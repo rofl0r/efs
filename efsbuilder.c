@@ -156,7 +156,8 @@ static int gen_mph(const struct mph_in *in, struct mph_out *out){
         out->blen = 1;
         out->shift = 31;  /* or 32 - mylog2(1) */
         out->salt = 0;
-        out->data = calloc(1, mph_bytes(1));
+        out->w = 1;
+        out->data = calloc(1, mph_bytes(1, 1));
         return 1;
     }
     u32 smax=1; while(smax<n) smax<<=1;
@@ -281,7 +282,8 @@ static int gen_mph(const struct mph_in *in, struct mph_out *out){
 
     if(!ok) goto fail;
 
-    u32 total_bytes = mph_bytes(blen);
+    u32 w = (sl+7) / 8;   /* based on smax, not blen */
+    u32 total_bytes = mph_bytes(blen, w);
     out->data = malloc(total_bytes);
     if(!out->data) goto fail;
     memset(out->data, 0, total_bytes);
@@ -289,16 +291,15 @@ static int gen_mph(const struct mph_in *in, struct mph_out *out){
     if(use_scramble){
         for(u32 b=0;b<blen;b++) out->data[b]=(u8)tabb[b].val_b;
         u32 o=blen;
-        u32 w=(mylog2(blen)+7)/8;
         for(u32 i=0;i<256;i++) for(u32 j=0;j<w;j++)
             out->data[o+ i*w +j] = (scramble[i]>>(8*(w-1-j)))&0xFF;
     } else {
-        u32 w=(mylog2(blen)+7)/8;
         for(u32 b=0;b<blen;b++){
             u32 disp = scramble[tabb[b].val_b];
             for(u32 j=0;j<w;j++) out->data[b*w+j]=(disp>>(8*(w-1-j)))&0xFF;
         }
     }
+    out->w = w;
     out->blen=blen;
     out->shift=shift;
     out->salt=salt;
@@ -354,7 +355,7 @@ static uint32_t idx_of(const char *nm, struct mph_out *mo){
     uint32_t v = lookup_k((const uint8_t*)nm, (uint32_t)strlen(nm), mo->salt * 0x9e3779b9);
     uint32_t a = v >> mo->shift;
     uint32_t b = v & (mo->blen - 1);
-    uint32_t w = mph_w(mo->blen);
+    uint32_t w = mo->w;
     uint32_t disp = (mo->blen >= 4096)
         ? tab_load(mo->data + mo->blen + mo->data[b]*w, w)
         : tab_load(mo->data + b*w, w);
@@ -428,11 +429,11 @@ static uint32_t build_dir(FILE *out, uint64_t *pos, const char *path){
     }
 
     uint64_t dir_start=*pos;
-    struct efs_dir hdr;
-    hdr.count=n; hdr.blen=mo.blen; hdr.shift=mo.shift; hdr.salt=mo.salt; hdr.names_len=names_len;
+    struct efs_dir hdr={0};
+    hdr.count=n; hdr.blen=mo.blen; hdr.shift=mo.shift; hdr.salt=mo.salt; hdr.w=mo.w; hdr.names_len=names_len;
     fseek(out,(long)dir_start,SEEK_SET);
     fwrite(&hdr,1,sizeof hdr,out);
-    fwrite(mo.data,1,mph_bytes(mo.blen),out);
+    fwrite(mo.data,1,mph_bytes(mo.blen, mo.w),out);
     fwrite(name_off,1,4*n,out);
     uint64_t eoff_pos=ftell(out);
     uint32_t *entry_off=malloc((n+1)*sizeof(uint32_t));

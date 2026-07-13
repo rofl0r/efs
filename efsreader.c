@@ -9,7 +9,7 @@
 
 static uint32_t entry_len(const struct efs_dir *d, uint32_t idx){
     const uint32_t *eo = (const uint32_t*)
-        ((const uint8_t*)d + 20 + mph_bytes(d->blen) + 4*d->count);
+        ((const uint8_t*)d + 20 + mph_bytes(d->blen, d->w) + 4*d->count);
     return eo[idx+1] - eo[idx];
 }
 

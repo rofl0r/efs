@@ -13,9 +13,12 @@
 struct efs_dir {
     uint32_t count;
     uint32_t blen;
-    uint32_t shift;
     uint32_t salt;
     uint32_t names_len;
+    uint8_t shift;
+    uint8_t w;
+    uint8_t reserved1;
+    uint8_t reserved2;
 };
 
 /* ---- API prototypes (always visible) ---- */
@@ -32,17 +35,11 @@ struct mph_data {
     uint32_t blen;
     uint32_t shift;
     uint32_t salt;
+    uint32_t w;
     uint8_t  data[];
 };
 
-static uint32_t mph_w(uint32_t blen){
-    uint32_t i = 0;
-    while (((uint32_t)1 << i) < blen) i++;
-    return (i + 7) / 8;
-}
-
-static uint32_t mph_bytes(uint32_t blen){
-    uint32_t w = mph_w(blen);
+static uint32_t mph_bytes(uint32_t blen, uint32_t w){
     return (blen >= 4096) ? (blen + 256 * w) : (blen * w);
 }
 
@@ -90,7 +87,7 @@ static uint32_t mph_lookup(const struct efs_dir *d, const char *key){
     uint32_t v = mph_lookup3((const uint8_t*)key, len, d->salt * 0x9e3779b9);
     uint32_t a = v >> d->shift;
     uint32_t b = v & (d->blen - 1);
-    uint32_t w = mph_w(d->blen);
+    uint32_t w = d->w;
     uint32_t disp;
     const uint8_t *tab = (const uint8_t*)(d + 1);
     if (d->blen >= 4096) {
@@ -107,7 +104,7 @@ static const uint8_t  *dir_hashtab(const struct efs_dir *d){
     return (const uint8_t*)(d + 1);
 }
 static const uint32_t *dir_name_off(const struct efs_dir *d){
-    return (const uint32_t*)(dir_hashtab(d) + mph_bytes(d->blen));
+    return (const uint32_t*)(dir_hashtab(d) + mph_bytes(d->blen, d->w));
 }
 static const uint32_t *dir_entry_off(const struct efs_dir *d){
     return dir_name_off(d) + d->count;
