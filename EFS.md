@@ -10,6 +10,22 @@ All internal offsets in `efs_dir` are relative to the start of that
 directory header (not the image start). The caller locates the magic,
 then treats the next bytes as `struct efs_dir *root`.
 
+## Design notes
+EFS is a compact, read-only filesystem image built around a **minimal perfect
+hash (MPH)** per directory. Each directory's entries are hashed into a dense
+index space of size `blen` (a power of two), so a name lookup requires only one
+hash computation, one table read for the displacement, and one array index
+into `name_offset` / `entry_offset` - **O(1) with no chaining or search**.
+All structural fields are 32-bit relative offsets from the directory header,
+so the image is position-independent and can be concatenated to any binary or
+mapped from a block device; the caller only adds a base pointer. Storage is
+kept minimal: only `count`, `blen`, `salt`, `names_len`, `shift`, and `w` are
+stored (20 bytes + padding), while `w` (scramble width) and the use of a
+scramble table are derived, not duplicated. Directory vs file is encoded in
+the leading `/` of the name, avoiding a type field. The result is a ROM-friendly
+structure with deterministic O(1) lookup, no dynamic allocation at read time,
+and a straightforward linear on-disk layout.
+
 ## Directory header (fixed fields, 20 bytes)
 struct efs_dir {
     uint32_t count;      /* number of entries */
