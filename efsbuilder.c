@@ -160,6 +160,7 @@ static int gen_mph(const struct mph_in *in, struct mph_out *out){
         return 1;
     }
     u32 smax=1; while(smax<n) smax<<=1;
+    if(smax < 2) smax = 2;
     u32 alen, blen;
     u32 sl = mylog2(smax);
     if(sl <= 8){ alen=smax/2; blen=smax/2; }
@@ -174,10 +175,10 @@ static int gen_mph(const struct mph_in *in, struct mph_out *out){
         alen = (n <= smax*5/8) ? smax/8 : smax/2;
         blen = (n <= smax*5/8) ? smax/4 : smax/2;
     }
-    if(blen<1) blen=1;
-    if(alen<1) alen=1;
+    if(blen<2) blen=2;
+    if(alen<2) alen=2;
 
-    u32 shift = 32 - mylog2(alen);
+    u32 shift = (alen > 1) ? 32 - mylog2(alen) : 0;
     u32 mask = blen-1;
     int use_scramble = (blen >= USE_SCRAMBLE);
 
