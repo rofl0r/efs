@@ -4,6 +4,13 @@
 #include <stdint.h>
 #include <string.h>
 
+/* The MPH generator lives in jmph.h (single-header library). We include it
+ * up front so the on-disk consumer (EFS_IMPL) can call jmph_bytes() to
+ * locate the name table; the heavy builder code is only compiled when
+ * MPH_IMPL or EFS_BUILDER is defined. The consumer reads back the table
+ * jmph_build produces, using the shared USE_SCRAMBLE threshold. */
+#include "jmph.h"
+
 #ifndef EFS_EXPORT
 #define EFS_EXPORT
 #endif
@@ -17,23 +24,14 @@
 #define USE_SCRAMBLE 4096
 #endif
 
-/* ---- shared MPH helpers (used by the on-disk consumer decoder) ---- */
-static uint32_t mph_bytes(uint32_t blen, uint32_t w){
-    return (blen >= USE_SCRAMBLE) ? (blen + 256 * w) : (blen * w);
-}
-
+/* tab_load() decodes a big-endian w-byte word from the directory hash
+ * table. It is tied to the on-disk directory entry layout (not the MPH
+ * algorithm), so it lives here rather than in jmph.h. */
 static uint32_t tab_load(const uint8_t *p, uint32_t w){
     uint32_t v = 0;
     while (w--) v = (v << 8) | *p++;
     return v;
 }
-
-/* The on-disk table layout and its scramble threshold are owned by the
- * MPH implementation (jmph.h). The consumer just reads back what the
- * builder wrote, so import that single constant here. */
-#ifndef USE_SCRAMBLE
-#define USE_SCRAMBLE 4096
-#endif
 
 struct efs_dir {
     uint32_t count;
@@ -119,7 +117,7 @@ static const uint8_t  *dir_hashtab(const struct efs_dir *d){
     return (const uint8_t*)(d + 1);
 }
 static const uint32_t *dir_name_off(const struct efs_dir *d){
-    return (const uint32_t*)(dir_hashtab(d) + mph_bytes(d->blen, d->w));
+    return (const uint32_t*)(dir_hashtab(d) + jmph_bytes(d->blen, d->w));
 }
 static const uint32_t *dir_entry_off(const struct efs_dir *d){
     return dir_name_off(d) + d->count;
@@ -213,14 +211,5 @@ EFS_EXPORT const char *efs_readdir(const struct efs_dir *dir, uint32_t *cursor){
  *      cannot be built for the current salt, never on a slow attempt.
  * =====================================================================
  */
-#ifdef EFS_BUILDER
-
-/* The MPH generator now lives in jmph.h (single-header library). Including
- * it here, with EFS_BUILDER defined, pulls in jmph_build() / jmph_index()
- * and the rest of the builder. The on-disk consumer (EFS_IMPL) reads back
- * the table jmph_build produces, using the shared USE_SCRAMBLE threshold. */
-#include "jmph.h"
-
-#endif /* EFS_BUILDER */
 
 #endif /* EFS_H */

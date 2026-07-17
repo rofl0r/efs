@@ -60,12 +60,15 @@ extern "C" {
 /* Public types and API (visible to every includer).                  */
 /* ------------------------------------------------------------------ */
 
-/* Build input: n keys, each a NUL-terminated string with length kl[i]
- * (< 256). keys/kl are caller-owned; the builder does not free them. */
+/* Build input: n keys, each a NUL-terminated string with length kl[i].
+ * keys/kl are caller-owned; the builder does not free them. kl is uint16_t
+ * because efs keys are per-directory file names, which are bounded by the
+ * NAME_MAX/component limit (<= 4 KB even under PATH_MAX), so a 16-bit
+ * length wastes less memory and uses cache better than uint32_t. */
 struct jmph_in {
-    uint32_t  n;     /* number of keys */
+    uint32_t   n;      /* number of keys */
     const char **keys; /* key strings (NUL-terminated) */
-    uint32_t *kl;    /* key lengths */
+    uint16_t   *kl;    /* key lengths (< 4096) */
 };
 
 /* Build output: a packed MPH table. Caller frees data with free(). */
@@ -77,7 +80,9 @@ struct jmph_out {
     uint8_t  *data;  /* packed table; free() with free() */
 };
 
-/* Exact serialized size of a built table (blen/w). */
+/* Exact serialized size of a built table (blen/w). This is part of the
+ * MPH layout, so it lives here in jmph.h (the on-disk efs consumer calls
+ * it to skip past the hash table). */
 JMPH_API uint32_t jmph_bytes(uint32_t blen, uint32_t w);
 
 /* Map `key` (klen bytes) to its unique slot in [0, blen-1], which is
@@ -94,6 +99,12 @@ JMPH_API int jmph_build(const struct jmph_in *in, struct jmph_out *out);
 /* ------------------------------------------------------------------ */
 /* Implementation (builder path only).                               */
 /* ------------------------------------------------------------------ */
+
+/* jmph_bytes is needed by the efs consumer (to locate the name table),
+ * so its definition is always available, not just on the builder path. */
+JMPH_API uint32_t jmph_bytes(uint32_t blen, uint32_t w){
+    return (blen >= USE_SCRAMBLE) ? (blen + 256 * w) : (blen * w);
+}
 
 #if defined(MPH_IMPL) || defined(EFS_BUILDER)
 
@@ -330,10 +341,6 @@ JMPH_INTERNAL void jmph_initalen(uint32_t n, uint32_t smax, uint32_t *alen, uint
     }
     if(*blen < 2) *blen = 2;
     if(*alen < 2) *alen = 2;
-}
-
-JMPH_API uint32_t jmph_bytes(uint32_t blen, uint32_t w){
-    return (blen >= USE_SCRAMBLE) ? (blen + 256 * w) : (blen * w);
 }
 
 JMPH_API uint32_t jmph_index(const struct jmph_out *mo, const uint8_t *key, uint32_t klen){
