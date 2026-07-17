@@ -99,9 +99,9 @@ static uint32_t build_dir(FILE *out, uint64_t *pos, const char *path){
     char **keys=malloc(n*sizeof(char*));
     uint32_t *kl=malloc(n*sizeof(uint32_t));
     for(uint32_t i=0;i<n;i++){ keys[i]=es[i].name; kl[i]=(uint32_t)strlen(es[i].name); }
-    struct mph_in mi={n,keys,kl};
-    struct mph_out mo;
-    if(!gen_mph(&mi,&mo)){ fprintf(stderr,"mph fail in %s\n",path); exit(1); }
+    struct jmph_in mi={n,(const char**)keys,kl};
+    struct jmph_out mo;
+    if(!jmph_build(&mi,&mo)){ fprintf(stderr,"mph fail in %s\n",path); exit(1); }
 
     /* local MPH index (mirrors efs.h reader) */
     uint32_t *order = malloc(n * sizeof(uint32_t));
@@ -109,8 +109,8 @@ static uint32_t build_dir(FILE *out, uint64_t *pos, const char *path){
     for(uint32_t i=1;i<n;i++){
         uint32_t key = order[i];
         uint32_t j = i;
-        while(j>0 && mph_index(&mo, (const uint8_t*)es[order[j-1]].name, (uint32_t)strlen(es[order[j-1]].name))
-                     > mph_index(&mo, (const uint8_t*)es[key].name, (uint32_t)strlen(es[key].name))){
+        while(j>0 && jmph_index(&mo, (const uint8_t*)es[order[j-1]].name, (uint32_t)strlen(es[order[j-1]].name))
+                     > jmph_index(&mo, (const uint8_t*)es[key].name, (uint32_t)strlen(es[key].name))){
             order[j] = order[j-1]; j--;
         }
         order[j] = key;
@@ -134,7 +134,7 @@ static uint32_t build_dir(FILE *out, uint64_t *pos, const char *path){
     hdr.count=n; hdr.blen=mo.blen; hdr.shift=mo.shift; hdr.salt=mo.salt; hdr.w=mo.w; hdr.names_len=names_len;
     fseek(out,(long)dir_start,SEEK_SET);
     fwrite(&hdr,1,sizeof hdr,out);
-    fwrite(mo.data,1,mph_bytes(mo.blen, mo.w),out);
+    fwrite(mo.data,1,jmph_bytes(mo.blen, mo.w),out);
     fwrite(name_off,1,4*n,out);
     uint64_t eoff_pos=ftell(out);
     uint32_t *entry_off=malloc((n+1)*sizeof(uint32_t));
