@@ -79,8 +79,16 @@ extern "C" {
 #define MPH_API
 #endif
 
+/* MPH_DEF controls the linkage of the functions *defined* in this header.
+ * The default `static inline` makes the header safe to include from several
+ * TUs that later link together (e.g. efstest.o + efstest_builder.o); a
+ * standalone single-TU tool may `#define MPH_DEF extern` to export them. */
+#ifndef MPH_DEF
+#define MPH_DEF static inline
+#endif
+
 /* Consumer-facing lookup. Returns 0 on miss, else the 1-indexed rank. */
-MPH_API uint64_t mph_lookup(const uint8_t *table, size_t tablen,
+MPH_DEF uint64_t mph_lookup(const uint8_t *table, size_t tablen,
                             const char *key, size_t keylen);
 
 /* The builder (BBHash engine + serializer) is compiled under MPH_IMPL.
@@ -746,7 +754,7 @@ MPH_INTERNAL uint8_t *mph_build_impl(const char * const *keys, const uint32_t *k
 }
 
 /* Standalone API (unchanged contract): blob from NUL-terminated keys. */
-MPH_API uint8_t *mph_build(const char * const *keys, size_t n_keys,
+MPH_DEF uint8_t *mph_build(const char * const *keys, size_t n_keys,
                            size_t *out_len) {
     uint32_t blen, salt;
     return mph_build_impl(keys, NULL, n_keys, out_len, &blen, &salt);
@@ -830,7 +838,7 @@ static inline uint64_t mph_rd_u64_at(const uint8_t *p) {
 }
 #endif
 
-MPH_API uint64_t mph_lookup(const uint8_t *table, size_t tablen,
+MPH_DEF uint64_t mph_lookup(const uint8_t *table, size_t tablen,
                             const char *key, size_t keylen) {
     if (!table || tablen < 5) return 0; /* need num_levels(u8)+seed(u32) at least */
     const uint8_t *p = table;
@@ -911,21 +919,21 @@ struct mph_out {
  * (bitsize_i = ceil64(2 * n_i), n_i = ceil(n / 2^i)), so the size needs no
  * descriptor -- exactly like jmph's jmph_bytes(blen, w). For the exact size
  * of a concrete table use mph_out.len from mph_build_u(). */
-MPH_API uint32_t mph_bytes(uint32_t levels, uint32_t n);
+MPH_DEF uint32_t mph_bytes(uint32_t levels, uint32_t n);
 
 /* Unified build: 1 on success (out filled, out->data malloc'd), 0 on
  * duplicate keys / OOM. Keys must be unique. */
-MPH_API int mph_build_u(const struct mph_in *in, struct mph_out *out);
+MPH_DEF int mph_build_u(const struct mph_in *in, struct mph_out *out);
 
 /* Unified decode: 0-based index of key[0..klen), reading the table bytes
  * with the four stored params. The blob's own 5-byte header carries
  * num_levels and seed; blen/salt are accepted (and validated against the
  * blob) for signature compatibility with the other MPH implementations. */
-MPH_API uint32_t mph_index_p(const uint8_t *tab, uint32_t blen, uint32_t shift,
+MPH_DEF uint32_t mph_index_p(const uint8_t *tab, uint32_t blen, uint32_t shift,
                              uint32_t salt, uint32_t w,
                              const char *key, uint32_t klen);
 
-MPH_API uint32_t mph_bytes(uint32_t levels, uint32_t n){
+MPH_DEF uint32_t mph_bytes(uint32_t levels, uint32_t n){
     /* Mirrors the deterministic level sizing in mph_new_boomphf exactly:
      * level i is sized for planned_i = ceil(n / 2^i), bitsize_i =
      * max(64, ceil64(2 * planned_i)). */
@@ -941,7 +949,7 @@ MPH_API uint32_t mph_bytes(uint32_t levels, uint32_t n){
     return total > 0xffffffffu ? 0 : (uint32_t)total;
 }
 
-MPH_API uint32_t mph_index_p(const uint8_t *tab, uint32_t blen, uint32_t shift,
+MPH_DEF uint32_t mph_index_p(const uint8_t *tab, uint32_t blen, uint32_t shift,
                              uint32_t salt, uint32_t w,
                              const char *key, uint32_t klen){
     (void)shift; (void)salt;
@@ -959,7 +967,7 @@ MPH_API uint32_t mph_index_p(const uint8_t *tab, uint32_t blen, uint32_t shift,
  * to preserve oomph's original two-role model. */
 #if defined(MPH_IMPL) || defined(EFS_BUILDER)
 
-MPH_API int mph_build_u(const struct mph_in *in, struct mph_out *out){ /* builder */
+MPH_DEF int mph_build_u(const struct mph_in *in, struct mph_out *out){ /* builder */
     *out = (struct mph_out){0};
     if (!in) return 0;
     size_t len = 0;
