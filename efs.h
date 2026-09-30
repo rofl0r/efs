@@ -22,10 +22,9 @@ struct efs_dir {
     uint32_t blen;
     uint32_t salt;
     uint32_t names_len;
-    uint8_t shift;
-    uint8_t w;
-    uint8_t reserved1;
-    uint8_t reserved2;
+    uint32_t w;      /* jmph: bytes per displacement (1..4); bbhash: n keys */
+    uint8_t shift;   /* jmph: MPH shift; bbhash: unused (0) */
+    uint8_t reserved[3];
 };
 
 /* ---- API prototypes (always visible) ---- */
@@ -51,29 +50,12 @@ static uint32_t efs_dir_index(const struct efs_dir *d, const char *key){
 static const uint8_t  *dir_hashtab(const struct efs_dir *d){
     return (const uint8_t*)(d + 1);
 }
-/* Byte length of the on-disk MPH table for directory `d`, computed from the
- * four stored parameters without any descriptor (per-algorithm). */
-static uint32_t efs_mph_tablen(const struct efs_dir *d){
-#ifdef EFS_MPH_OOMPH
-    /* BBHash blob: 5-byte header (num_levels + seed), then per level a u32
-     * bitsize followed by its bitvector and rank table. Walk the headers. */
-    const uint8_t *p = dir_hashtab(d), *q = p;
-    uint32_t levels = *q++;
-    q += 4; /* seed */
-    for(uint32_t i = 0; i < levels; i++){
-        uint32_t bitsize = ((uint32_t)q[0]<<24)|((uint32_t)q[1]<<16)|
-                           ((uint32_t)q[2]<<8)|(uint32_t)q[3];
-        q += 4;
-        uint32_t size = (bitsize + 63) / 64, rank_size = (bitsize + 511) / 512 + 1;
-        q += (size_t)size * 8 + (size_t)rank_size * 8;
-    }
-    return (uint32_t)(q - p);
-#else
-    return efs_mph_bytes(d->blen, d->w);
-#endif
-}
 static const uint32_t *dir_name_off(const struct efs_dir *d){
-    return (const uint32_t*)(dir_hashtab(d) + efs_mph_tablen(d));
+    /* efs_mph_bytes(blen, w) is the unified table-size function: for jmph w
+     * is the displacement width; for BBHash blen is the level count and w is
+     * the key count (n), from which the level sizes are derived. Either way
+     * the size is computed from the stored params with no descriptor. */
+    return (const uint32_t*)(dir_hashtab(d) + efs_mph_bytes(d->blen, d->w));
 }
 static const uint32_t *dir_entry_off(const struct efs_dir *d){
     return dir_name_off(d) + d->count;

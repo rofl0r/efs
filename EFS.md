@@ -19,27 +19,35 @@ into `name_offset` / `entry_offset` - **O(1) with no chaining or search**.
 All structural fields are 32-bit relative offsets from the directory header,
 so the image is position-independent and can be concatenated to any binary or
 mapped from a block device; the caller only adds a base pointer. Storage is
-kept minimal: only `count`, `blen`, `salt`, `names_len`, `shift`, and `w` are
-stored (20 bytes + padding), while `w` (scramble width) and the use of a
-scramble table are derived, not duplicated. Directory vs file is encoded in
-the leading `/` of the name, avoiding a type field. The result is a ROM-friendly
-structure with deterministic O(1) lookup, no dynamic allocation at read time,
-and a straightforward linear on-disk layout.
+kept minimal: only `count`, `blen`, `salt`, `names_len`, `w`, and `shift` are
+stored (24 bytes), while the use of a scramble table is derived, not
+duplicated. Directory vs file is encoded in the leading `/` of the name,
+avoiding a type field. The result is a ROM-friendly structure with
+deterministic O(1) lookup, no dynamic allocation at read time, and a
+straightforward linear on-disk layout.
 
-## Directory header (fixed fields, 20 bytes)
+The four MPH parameters (`blen`, `salt`, `w`, `shift`) are algorithm-generic
+slots (see UNIVERSAL-API-REVISED.md): the MPH implementation is chosen at
+compile time, so the header carries no algorithm descriptor. For jmph (the
+default) `blen`=table buckets, `salt`=seed, `w`=displacement width (1..4),
+`shift`=hash shift. For BBHash `blen`=level count, `salt`=seed, `w`=key
+count, `shift`=0.
+
+## Directory header (fixed fields, 24 bytes)
 struct efs_dir {
     uint32_t count;      /* number of entries */
-    uint32_t blen;       /* hash table size (power of two, >= 2) */
-    uint32_t salt;       /* MPH seed multiplier */
+    uint32_t blen;       /* MPH param: table buckets (jmph) / levels (bbhash) */
+    uint32_t salt;       /* MPH param: hash seed */
     uint32_t names_len;  /* byte length of names blob (padded to 4) */
-    uint8_t  shift;      /* MPH shift (0..31) */
-    uint8_t  w;          /* bytes per scramble entry (1..4) */
-    uint8_t  reserved1;
-    uint8_t  reserved2;
+    uint32_t w;          /* MPH param: displacement width (jmph) / n (bbhash) */
+    uint8_t  shift;      /* MPH param: hash shift (jmph); unused (bbhash) */
+    uint8_t  reserved[3];
 };
 
 ## On-disk layout (immediately after header)
-[ hashtab       ]  size = mph_bytes(blen, w)   (opaque MPH data)
+[ hashtab       ]  size = mph_bytes(blen, w)  (opaque MPH data; the unified
+                                             per-algorithm size function --
+                                             jmph_bytes / mph_bytes)
 [ name_offset[] ]  u32[count]                 (indexed by MPH index)
 [ entry_offset[]]  u32[count+1]               (data ranges)
 [ names         ]  u8[names_len]              (NUL-terminated, 4-byte padded)

@@ -164,7 +164,16 @@ MPH_INTERNAL mph_boomphf_t *mph_new_boomphf(double gamma, uint64_t *keys,
     uint64_t *current_keys = keys;
 
     while (remaining > 0) {
-        unsigned bitsize = ((unsigned)(gamma * remaining) + 63) & ~63U;
+        /* Deterministic level sizing (gamma=2): level i is sized for the
+         * *planned* key count n_i = ceil(num_keys / 2^i), not the actual
+         * (collision-dependent) remainder. This makes the table size a pure
+         * function of (num_levels, num_keys) -- see mph_bytes() -- so the
+         * consumer needs no descriptor to locate what follows the table.
+         * gamma=2 keeps each level a 2:1 bitvector, which is large enough to
+         * hold a ~n_i/2 subset of n_i keys with room to spare. */
+        unsigned planned = (unsigned)((num_keys + ((1u << level) - 1)) >> level);
+        unsigned bitsize = ((unsigned)(gamma * planned) + 63) & ~63U;
+        if (bitsize < 64) bitsize = 64;
 
         mph_bitvector_t *A = mph_new_bv(bitsize);
         mph_bitvector_t *collide = mph_new_bv(bitsize);
@@ -617,16 +626,19 @@ struct mph_out {
     uint32_t  blen;  /* BBHash num_levels                                */
     uint32_t  shift; /* unused (0)                                       */
     uint32_t  salt;  /* hash seed                                        */
-    uint32_t  w;     /* unused (0)                                       */
+    uint32_t  w;     /* key count n (lets the consumer derive table size)  */
 };
 
-/* Serialized size of a `levels`-level BBHash table. The blob header is 5
- * bytes (num_levels u8 + seed u32); each level stores a u32 bitsize plus
- * ((bitsize+63)/64 + ((bitsize+511)/512+1)) u64 words. bitsize of level i is
- * round_up_64(gamma * n_i) with n_i keys reaching that level, so the size is
- * data-dependent; call mph_build() (which sets mph_out.len) for the exact
- * size of a concrete table. */
-MPH_API uint32_t mph_bytes(uint32_t levels, uint32_t w);
+/* Serialized size of a BBHash table with `levels` levels built for `n` keys
+ * (this is the unified-API size function: mph_bytes(levels, n)). The blob is
+ * a 5-byte header (num_levels u8 + seed u32) then, per level, a u32 bitsize
+ * followed by ((bitsize+63)/64) bitvector words and ((bitsize+511)/512+1)
+ * rank words (u64 each). The level bitsizes are derived deterministically
+ * from n with gamma=2 and a geometric halving of the remaining keys
+ * (bitsize_i = ceil64(2 * n_i), n_i = ceil(n / 2^i)), so the size needs no
+ * descriptor -- exactly like jmph's jmph_bytes(blen, w). For the exact size
+ * of a concrete table use mph_out.len from mph_build_u(). */
+MPH_API uint32_t mph_bytes(uint32_t levels, uint32_t n);
 
 /* Unified build: 1 on success (out filled, out->data malloc'd), 0 on
  * duplicate keys / OOM. Keys must be unique. */
@@ -640,29 +652,31 @@ MPH_API uint32_t mph_index_p(const uint8_t *tab, uint32_t blen, uint32_t shift,
                              uint32_t salt, uint32_t w,
                              const char *key, uint32_t klen);
 
-/* Walk the level headers to compute the serialized blob length. This is the
- * exact inverse of the serializer: 5-byte header, then per level a u32
- * bitsize followed by the bitvector and rank table it implies. */
-static size_t mph_blob_len(const uint8_t *tab){
-    const uint8_t *p = tab;
-    uint32_t levels = mph_rd_u8(&p);
-    p += 4;                                 /* seed */
+MPH_API uint32_t mph_bytes(uint32_t levels, uint32_t n){
+    /* Mirrors the deterministic level sizing in mph_new_boomphf exactly:
+     * level i is sized for planned_i = ceil(n / 2^i), bitsize_i =
+     * max(64, ceil64(2 * planned_i)). */
+    uint64_t total = 5;                     /* num_levels + seed header */
     for (uint32_t i = 0; i < levels; i++){
-        uint32_t bitsize = mph_rd_u32(&p);
-        uint32_t size = (bitsize + 63) / 64;
-        uint32_t rank_size = (bitsize + 511) / 512 + 1;
-        p += (size_t)size * 8 + (size_t)rank_size * 8;
+        uint64_t planned = (n + ((1ull << i) - 1)) >> i;   /* ceil(n / 2^i) */
+        uint64_t bitsize = ((2 * planned) + 63) & ~63ull;  /* ceil64(2*planned) */
+        if (bitsize < 64) bitsize = 64;
+        uint64_t size = (bitsize + 63) / 64;
+        uint64_t rank_size = (bitsize + 511) / 512 + 1;
+        total += 4 + (size + rank_size) * 8;
     }
-    return (size_t)(p - tab);
+    return total > 0xffffffffu ? 0 : (uint32_t)total;
 }
 
 MPH_API uint32_t mph_index_p(const uint8_t *tab, uint32_t blen, uint32_t shift,
                              uint32_t salt, uint32_t w,
                              const char *key, uint32_t klen){
-    (void)shift; (void)w; (void)salt;
+    (void)shift; (void)salt;
     if (!tab) return 0;
     if (blen && tab[0] != (uint8_t)blen) return 0;   /* params disagree with blob */
-    size_t tablen = mph_blob_len(tab);
+    /* w carries the key count n in the unified EFS wiring (see mph_build_u),
+     * letting us size the table for mph_lookup's bounds checks. */
+    size_t tablen = mph_bytes((uint32_t)tab[0], w);
     uint64_t r = mph_lookup(tab, tablen, key, klen);
     return r ? (uint32_t)(r - 1) : 0;
 }
@@ -685,7 +699,7 @@ MPH_API int mph_build_u(const struct mph_in *in, struct mph_out *out){ /* builde
     out->blen  = blen;
     out->salt  = salt;
     out->shift = 0;
-    out->w     = 0;
+    out->w     = in->n;   /* key count, used by mph_index_p for table sizing */
     return 1;
 }
 
