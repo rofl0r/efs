@@ -453,6 +453,17 @@ static inline uint64_t mph_hash_string(const char *s, size_t len, uint64_t seed)
     }
     return mph_mix64(h);
 }
+/* popcount is used by mph_lookup's rank decode on the consumer path too. */
+#if defined(__GNUC__) && __GNUC__ >= 3
+static inline int mph_popcountll(uint64_t x) { return __builtin_popcountll(x); }
+#else
+static inline int mph_popcountll(uint64_t x) {
+    x = x - ((x >> 1) & 0x5555555555555555ULL);
+    x = (x & 0x3333333333333333ULL) + ((x >> 2) & 0x3333333333333333ULL);
+    x = (x + (x >> 4)) & 0x0f0f0f0f0f0f0f0fULL;
+    return (int)((x * 0x0101010101010101ULL) >> 56);
+}
+#endif
 static inline uint8_t  mph_rd_u8 (const uint8_t **p) { return *(*p)++; }
 static inline uint32_t mph_rd_u32(const uint8_t **p) {
     uint32_t v = 0; for (unsigned i = 0; i < 4; i++) v |= (uint32_t)mph_rd_u8(p) << (8 * i);
@@ -474,7 +485,13 @@ MPH_API uint64_t mph_lookup(const uint8_t *table, size_t tablen,
     const uint8_t *p = table;
     uint8_t num_levels = mph_rd_u8(&p);
     uint64_t seed = mph_rd_u32(&p);
-    uint64_t h = mph_hash_string(key, keylen, seed);
+    /* Must match the builder's index hash. mph_build_keys() maps each key to
+     * mix64(FNV1a(key, seed)); mph_new_boomphf() then applies mph_mix64 to
+     * that value to place it in a level, i.e. the effective index hash is
+     *     mix64( mix64( FNV1a(key, seed) ) ).
+     * The consumer previously computed only FNV1a(key, seed) (one fewer
+     * mix64), so it could never find any key. Apply the same double mix. */
+    uint64_t h = mph_mix64(mph_hash_string(key, keylen, seed));
     uint32_t h1 = (uint32_t)h, h2 = (uint32_t)(h >> 32);
 
     for (uint8_t level = 0; level < num_levels; level++) {
