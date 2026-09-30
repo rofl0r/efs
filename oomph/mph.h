@@ -202,7 +202,10 @@ MPH_INTERNAL mph_boomphf_t *mph_new_boomphf(double gamma, uint64_t *keys,
 
         uint64_t *to_free = current_keys;
         current_keys = redo;
-        free(to_free);
+        /* `keys` is the caller's buffer (passed in on level 0); only the
+         * per-level `redo` arrays are ours to free. Freeing the caller's
+         * array here would double-free when mph_build() frees it again. */
+        if (to_free != keys) free(to_free);
 
         remaining = redo_count;
         level++;
