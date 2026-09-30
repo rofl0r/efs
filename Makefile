@@ -1,14 +1,14 @@
 -include config.mak
 
-# Select the MPH implementation: MPH=JMPH (default, Jenkins) or MPH=BBHASH
-# (oomph/ BBHash). One algorithm is compiled into the image; there is nothing
-# in the image that identifies the algorithm.
+# Select the MPH implementation: MPH=JMPH (default, Jenkins, jmph.h) or
+# MPH=BBHASH (bbhash.h, the oomph/ BBHash library). One algorithm is compiled
+# into the image; there is nothing in the image that identifies the algorithm.
 MPH ?= JMPH
 
 MPH_DEF_JMPH   =
 MPH_DEF_BBHASH = -DEFS_MPH_OOMPH
 MPH_DEP_JMPH   = jmph.h
-MPH_DEP_BBHASH = oomph/mph.h oomph/tlist.h
+MPH_DEP_BBHASH = bbhash.h
 
 MPH_DEF = $(MPH_DEF_$(MPH))
 MPH_DEP = $(MPH_DEP_$(MPH))
