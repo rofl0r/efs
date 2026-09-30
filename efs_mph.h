@@ -20,7 +20,7 @@
 
 #if defined(EFS_MPH_OOMPH)
 
-#  include "oomph/mph.h"
+#  include "bbhash.h"
 #  define efs_mph_in      mph_in
 #  define efs_mph_out     mph_out
 #  define efs_mph_build   mph_build_u
