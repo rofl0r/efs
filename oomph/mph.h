@@ -27,7 +27,9 @@ extern "C" {
  *     blob from a set of string keys via mph_build().
  *   * CONSUMER (just include): looks a key up in a blob via mph_lookup().
  *
- * The blob (little-endian, no header, endian-agnostic on every host):
+ * The blob (little-endian throughout, no header, endian-agnostic on every
+ * host — every multi-byte value is read/written byte-by-byte with
+ * shift-and-or, so the layout is identical on LE and BE hosts):
  *     [ u8  num_levels ]
  *     [ u32 seed ]                        // baked-in hash seed
  *     per level:
@@ -407,20 +409,20 @@ MPH_INTERNAL uint8_t mph_rd_u8(const uint8_t **p) { return *(*p)++; }
 
 MPH_INTERNAL uint32_t mph_rd_u32(const uint8_t **p) {
     uint32_t v = 0;
-    for (unsigned i = 0; i < 4; i++) v = (v << 8) | mph_rd_u8(p);
+    for (unsigned i = 0; i < 4; i++) v |= (uint32_t)mph_rd_u8(p) << (8 * i);
     return v;
 }
 
 MPH_INTERNAL uint64_t mph_rd_u64(const uint8_t **p) {
     uint64_t v = 0;
-    for (unsigned i = 0; i < 8; i++) v = (v << 8) | mph_rd_u8(p);
+    for (unsigned i = 0; i < 8; i++) v |= (uint64_t)mph_rd_u8(p) << (8 * i);
     return v;
 }
 
 /* Read a little-endian u64 from an arbitrary offset (no cursor advance). */
 MPH_INTERNAL uint64_t mph_rd_u64_at(const uint8_t *p) {
     uint64_t v = 0;
-    for (unsigned i = 0; i < 8; i++) v = (v << 8) | p[i];
+    for (unsigned i = 0; i < 8; i++) v |= (uint64_t)p[i] << (8 * i);
     return v;
 }
 
@@ -453,15 +455,15 @@ static inline uint64_t mph_hash_string(const char *s, size_t len, uint64_t seed)
 }
 static inline uint8_t  mph_rd_u8 (const uint8_t **p) { return *(*p)++; }
 static inline uint32_t mph_rd_u32(const uint8_t **p) {
-    uint32_t v = 0; for (unsigned i = 0; i < 4; i++) v = (v << 8) | mph_rd_u8(p);
+    uint32_t v = 0; for (unsigned i = 0; i < 4; i++) v |= (uint32_t)mph_rd_u8(p) << (8 * i);
     return v;
 }
 static inline uint64_t mph_rd_u64(const uint8_t **p) {
-    uint64_t v = 0; for (unsigned i = 0; i < 8; i++) v = (v << 8) | mph_rd_u8(p);
+    uint64_t v = 0; for (unsigned i = 0; i < 8; i++) v |= (uint64_t)mph_rd_u8(p) << (8 * i);
     return v;
 }
 static inline uint64_t mph_rd_u64_at(const uint8_t *p) {
-    uint64_t v = 0; for (unsigned i = 0; i < 8; i++) v = (v << 8) | p[i];
+    uint64_t v = 0; for (unsigned i = 0; i < 8; i++) v |= (uint64_t)p[i] << (8 * i);
     return v;
 }
 #endif
