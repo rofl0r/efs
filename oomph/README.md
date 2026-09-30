@@ -197,8 +197,8 @@ Timing is printed per run (portable, no `time(1)` dependency).
 - **Popcount**: `mph_popcountll` uses `__builtin_popcountll` when
   `__GNUC__ >= 3` (auto-`#define HAVE_POPCOUNTLL`), else a portable bit-twiddle
   fallback. Defined under `MPH_IMPL`.
-- **Portability**: every multi-byte value is read byte-by-byte with
-  shift-and-or (big-endian *in the blob*), so the produced tables work on
+- **Portability**: every multi-byte value is read/written byte-by-byte with
+  shift-and-or (little-endian *in the blob*), so the produced tables work on
   any host endianness.
 - **`tlist.h`** provides the sorted, binary-searchable key collection used by
   the string generators' build step (and by `mph.h`'s producer).
