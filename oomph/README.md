@@ -198,7 +198,8 @@ Timing is printed per run (portable, no `time(1)` dependency).
   `__GNUC__ >= 3` (auto-`#define HAVE_POPCOUNTLL`), else a portable bit-twiddle
   fallback. Defined under `MPH_IMPL`.
 - **Portability**: every multi-byte value is read/written byte-by-byte with
-  shift-and-or (little-endian *in the blob*), so the produced tables work on
-  any host endianness.
+  shift-and-or (big-endian *in the blob*), so the produced tables work on
+  any host endianness. This matches jmph's table storage, so both MPH
+  implementations share one on-disk byte order.
 - **`tlist.h`** provides the sorted, binary-searchable key collection used by
   the string generators' build step (and by `mph.h`'s producer).

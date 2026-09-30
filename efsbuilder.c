@@ -97,25 +97,25 @@ static uint32_t build_dir(FILE *out, uint64_t *pos, const char *path){
 
     /* build MPH.
      * Names are per-directory components, bounded by the filename limit
-     * (<= 4 KB even for PATH_MAX), so a 16-bit key length is plenty and
-     * halves the kl array's memory / cache footprint. */
+     * (<= 4 KB even for PATH_MAX); the unified MPH API takes 32-bit key
+     * lengths. */
     char **keys=malloc(n*sizeof(char*));
-    uint16_t *kl=malloc(n*sizeof(uint16_t));
-    for(uint32_t i=0;i<n;i++){ keys[i]=es[i].name; kl[i]=(uint16_t)strlen(es[i].name); }
-    struct jmph_in mi={n,(const char**)keys,kl};
-    struct jmph_out mo;
-    if(!jmph_build(&mi,&mo)){ fprintf(stderr,"mph fail in %s\n",path); exit(1); }
+    uint32_t *kl=malloc(n*sizeof(uint32_t));
+    for(uint32_t i=0;i<n;i++){ keys[i]=es[i].name; kl[i]=(uint32_t)strlen(es[i].name); }
+    struct efs_mph_in mi={n,(const char*const*)keys,kl};
+    struct efs_mph_out mo;
+    if(!efs_mph_build(&mi,&mo)){ fprintf(stderr,"mph fail in %s\n",path); exit(1); }
 
-    /* local MPH index (mirrors efs.h reader).
-     * The key length is taken from the kl[] array we already built, so we
-     * don't re-scan the string here (jmph_index only needs the length). */
+    /* local MPH index (mirrors efs.h reader). The key length is taken from
+     * the kl[] array we already built, so we don't re-scan the string here
+     * (efs_mph_index only needs the length). */
     uint32_t *order = malloc(n * sizeof(uint32_t));
     for(uint32_t i=0;i<n;i++) order[i] = i;
     for(uint32_t i=1;i<n;i++){
         uint32_t key = order[i];
         uint32_t j = i;
-        while(j>0 && jmph_index(&mo, (const uint8_t*)es[order[j-1]].name, kl[order[j-1]])
-                     > jmph_index(&mo, (const uint8_t*)es[key].name, kl[key])){
+        while(j>0 && efs_mph_index(mo.data, mo.blen, mo.shift, mo.salt, mo.w, es[order[j-1]].name, kl[order[j-1]])
+                     > efs_mph_index(mo.data, mo.blen, mo.shift, mo.salt, mo.w, es[key].name, kl[key])){
             order[j] = order[j-1]; j--;
         }
         order[j] = key;
@@ -129,7 +129,7 @@ static uint32_t build_dir(FILE *out, uint64_t *pos, const char *path){
     uint32_t off=0;
     for(uint32_t i=0;i<n;i++){
         const char *nm = es[order[i]].name;
-        uint16_t l = kl[order[i]];
+        uint32_t l = kl[order[i]];
         name_off[i] = off;
         memcpy(names+off, nm, l+1);
         off += (uint32_t)l + 1;
@@ -140,7 +140,7 @@ static uint32_t build_dir(FILE *out, uint64_t *pos, const char *path){
     hdr.count=n; hdr.blen=mo.blen; hdr.shift=mo.shift; hdr.salt=mo.salt; hdr.w=mo.w; hdr.names_len=names_len;
     fseek(out,(long)dir_start,SEEK_SET);
     fwrite(&hdr,1,sizeof hdr,out);
-    fwrite(mo.data,1,jmph_bytes(mo.blen, mo.w),out);
+    fwrite(mo.data,1,mo.len,out);
     fwrite(name_off,1,4*n,out);
     uint64_t eoff_pos=ftell(out);
     uint32_t *entry_off=malloc((n+1)*sizeof(uint32_t));

@@ -14,7 +14,7 @@
 
 int main(void){
     char **keys = NULL;
-    uint16_t *kl = NULL;
+    uint32_t *kl = NULL;
     size_t n = 0, cap = 0;
     char buf[65536];
 
@@ -29,7 +29,7 @@ int main(void){
             kl   = realloc(kl,   cap * sizeof(*kl));
         }
         keys[n] = strdup(buf);
-        kl[n] = (uint16_t)L;
+        kl[n] = (uint32_t)L;
         n++;
     }
     if(n == 0){ fprintf(stderr, "no keys\n"); return 1; }
