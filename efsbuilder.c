@@ -170,14 +170,23 @@ static uint32_t build_dir(FILE *out, uint64_t *pos, const char *path){
     return (uint32_t)(data_pos-dir_start);
 }
 
-int main(int argc,char**argv){
-    if(argc<3){ fprintf(stderr,"usage: %s out.efs dir\n",argv[0]); return 1; }
-    FILE *out=fopen(argv[1],"wb");
-    if(!out){ perror("fopen"); return 1; }
+/* Library entry point: build an EFS image of the directory tree at srcpath
+ * and write it to outpath (with the EFS magic prepended). Returns 0 on
+ * success, -1 on failure. Used by the CLI below and by efstest. */
+EFS_BUILD_API int efs_build_path(const char *srcpath, const char *outpath){
+    FILE *out=fopen(outpath,"wb");
+    if(!out){ perror("fopen"); return -1; }
     fwrite(EFS_MAGIC,1,4,out);
     uint64_t pos=4;
-    build_dir(out,&pos,argv[2]);
+    build_dir(out,&pos,srcpath);
     fclose(out);
     return 0;
 }
+
+#ifndef EFS_NO_MAIN
+int main(int argc,char**argv){
+    if(argc<3){ fprintf(stderr,"usage: %s out.efs dir\n",argv[0]); return 1; }
+    return efs_build_path(argv[2], argv[1]) == 0 ? 0 : 1;
+}
+#endif
 

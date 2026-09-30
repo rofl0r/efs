@@ -11,8 +11,13 @@
  * is only compiled when MPH_IMPL or EFS_BUILDER is defined. */
 #include "efs_mph.h"
 
+/* EFS_EXPORT controls the linkage of the EFS API functions, which are
+ * defined in this header (under EFS_IMPL). The default `static inline` makes
+ * the header safe to include from several TUs that later link together (e.g.
+ * efstest.o + efstest_builder.o); a program that wants a single exported
+ * definition instead can `#define EFS_EXPORT extern` in exactly one TU. */
 #ifndef EFS_EXPORT
-#define EFS_EXPORT
+#define EFS_EXPORT static inline
 #endif
 
 #define EFS_MAGIC "EFS\x01"
@@ -30,6 +35,15 @@ struct efs_dir {
 /* ---- API prototypes (always visible) ---- */
 EFS_EXPORT const uint8_t *efs_lookup(const struct efs_dir *root, const char *path, uint32_t *len, int *is_dir);
 EFS_EXPORT const char    *efs_readdir(const struct efs_dir *dir, uint32_t *cursor);
+/* Build an EFS image of the directory tree at srcpath into outpath.
+ * Implemented by efsbuilder.c; returns 0 on success, -1 on failure.
+ * EFS_BUILD_API controls its linkage (extern by default so it can live in
+ * the builder object; efstest defines it `static` to give the builder TU
+ * internal linkage and avoid a duplicate symbol). */
+#ifndef EFS_BUILD_API
+#define EFS_BUILD_API
+#endif
+EFS_BUILD_API int         efs_build_path(const char *srcpath, const char *outpath);
 
 #ifdef EFS_IMPL
 
