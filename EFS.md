@@ -28,10 +28,10 @@ straightforward linear on-disk layout.
 
 The four MPH parameters (`blen`, `salt`, `w`, `shift`) are algorithm-generic
 slots (see UNIVERSAL-API-REVISED.md): the MPH implementation is chosen at
-compile time, so the header carries no algorithm descriptor. For jmph (the
-default) `blen`=table buckets, `salt`=seed, `w`=displacement width (1..4),
-`shift`=hash shift. For BBHash `blen`=level count, `salt`=seed, `w`=key
-count, `shift`=0.
+compile time, so the header carries no algorithm descriptor. For jmph (the default) `blen`=table buckets, `salt`=seed, `w`=displacement
+width (1..4), `shift`=hash shift. For BBHash `blen`=level count, `salt`=seed,
+`w`=serialized BBHash table length, `shift`=0. The meaning of `w` is
+algorithm-specific; `mph_bytes(blen, w)` is the shared size-function signature.
 
 ## Directory header (fixed fields, 24 bytes)
 struct efs_dir {
@@ -39,7 +39,7 @@ struct efs_dir {
     uint32_t blen;       /* MPH param: table buckets (jmph) / levels (bbhash) */
     uint32_t salt;       /* MPH param: hash seed */
     uint32_t names_len;  /* byte length of names blob (padded to 4) */
-    uint32_t w;          /* MPH param: displacement width (jmph) / n (bbhash) */
+    uint32_t w;          /* MPH param: displacement width (jmph) / table bytes (bbhash) */
     uint8_t  shift;      /* MPH param: hash shift (jmph); unused (bbhash) */
     uint8_t  reserved[3];
 };
@@ -76,4 +76,3 @@ dir_hashtab(d)   = (u8*)(d+1)
 dir_name_off(d)  = (u32*)(dir_hashtab(d) + mph_bytes(d->blen, d->w))
 dir_entry_off(d) = dir_name_off(d) + d->count
 dir_names(d)     = (u8*)(dir_entry_off(d) + d->count + 1)
-
