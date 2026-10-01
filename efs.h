@@ -4,112 +4,60 @@
 #include <stdint.h>
 #include <string.h>
 
-/* The MPH generator lives in jmph.h (single-header library). We include it
- * up front so the on-disk consumer (EFS_IMPL) can call jmph_bytes() to
- * locate the name table; the heavy builder code is only compiled when
- * MPH_IMPL or EFS_BUILDER is defined. The consumer reads back the table
- * jmph_build produces, using the shared USE_SCRAMBLE threshold. */
-#include "jmph.h"
+/* The MPH generator is selected at compile time by efs_mph.h (jmph.h by
+ * default; oomph/mph.h when EFS_MPH_OOMPH is defined). We include it up
+ * front so the on-disk consumer (EFS_IMPL) can call efs_mph_index()/
+ * efs_mph_bytes() to locate and read the name table; the heavy builder code
+ * is only compiled when MPH_IMPL or EFS_BUILDER is defined. */
+#include "efs_mph.h"
 
+/* EFS_EXPORT controls the linkage of the EFS API functions, which are
+ * defined in this header (under EFS_IMPL). The default `static inline` makes
+ * the header safe to include from several TUs that later link together (e.g.
+ * efstest.o + efstest_builder.o); a program that wants a single exported
+ * definition instead can `#define EFS_EXPORT extern` in exactly one TU. */
 #ifndef EFS_EXPORT
-#define EFS_EXPORT
+#define EFS_EXPORT static inline
 #endif
 
 #define EFS_MAGIC "EFS\x01"
-
-/* The on-disk table layout and its scramble threshold are owned by the
- * MPH implementation (jmph.h). The consumer just reads back what the
- * builder wrote, so import that single constant here. */
-#ifndef USE_SCRAMBLE
-#define USE_SCRAMBLE 4096
-#endif
-
-/* tab_load() decodes a big-endian w-byte word from the directory hash
- * table. It is tied to the on-disk directory entry layout (not the MPH
- * algorithm), so it lives here rather than in jmph.h. */
-static uint32_t tab_load(const uint8_t *p, uint32_t w){
-    uint32_t v = 0;
-    while (w--) v = (v << 8) | *p++;
-    return v;
-}
 
 struct efs_dir {
     uint32_t count;
     uint32_t blen;
     uint32_t salt;
     uint32_t names_len;
-    uint8_t shift;
-    uint8_t w;
-    uint8_t reserved1;
-    uint8_t reserved2;
+    uint32_t w;      /* jmph: bytes per displacement (1..4); bbhash: n keys */
+    uint8_t shift;   /* jmph: MPH shift; bbhash: unused (0) */
+    uint8_t reserved[3];
 };
 
 /* ---- API prototypes (always visible) ---- */
 EFS_EXPORT const uint8_t *efs_lookup(const struct efs_dir *root, const char *path, uint32_t *len, int *is_dir);
 EFS_EXPORT const char    *efs_readdir(const struct efs_dir *dir, uint32_t *cursor);
+/* Build an EFS image of the directory tree at srcpath into outpath.
+ * Implemented by efsbuilder.c; returns 0 on success, -1 on failure.
+ * EFS_BUILD_API controls its linkage (extern by default so it can live in
+ * the builder object; efstest defines it `static` to give the builder TU
+ * internal linkage and avoid a duplicate symbol). */
+#ifndef EFS_BUILD_API
+#define EFS_BUILD_API
+#endif
+EFS_BUILD_API int         efs_build_path(const char *srcpath, const char *outpath);
 
 #ifdef EFS_IMPL
 
-/* ---- MPH consumer code (from CONSUMER_CODE) ---- */
 #include <stdint.h>
 #include <string.h>
 
-struct mph_data {
-    uint32_t blen;
-    uint32_t shift;
-    uint32_t salt;
-    uint32_t w;
-    uint8_t  data[];
-};
-
-static uint32_t tab_disp(const struct mph_data *m, uint32_t b, uint32_t w){
-    if (m->blen >= 4096) {
-        uint32_t idx = m->data[b];
-        return tab_load(m->data + m->blen + idx * w, w);
-    }
-    return tab_load(m->data + b * w, w);
-}
-
-static uint32_t mph_lookup3(const uint8_t *k, uint32_t len, uint32_t level){
-    uint32_t a,b,c,o=len;
-    a=b=0x9e3779b9; c=level;
-    while(len>=12){
-        a+=(k[0]|k[1]<<8|k[2]<<16|k[3]<<24);
-        b+=(k[4]|k[5]<<8|k[6]<<16|k[7]<<24);
-        c+=(k[8]|k[9]<<8|k[10]<<16|k[11]<<24);
-        a-=b;a-=c;a^=c>>13;b-=c;b-=a;b^=a<<8;c-=a;c-=b;c^=b>>13;
-        a-=b;a-=c;a^=c>>12;b-=c;b-=a;b^=a<<16;c-=a;c-=b;c^=b>>5;
-        a-=b;a-=c;a^=c>>3;b-=c;b-=a;b^=a<<10;c-=a;c-=b;c^=b>>15;
-        k+=12; len-=12;
-    }
-    c+=o;
-    switch(len){
-    case 11:c+=k[10]<<24; case 10:c+=k[9]<<16; case 9:c+=k[8]<<8;
-    case 8:b+=k[7]<<24; case 7:b+=k[6]<<16; case 6:b+=k[5]<<8; case 5:b+=k[4];
-    case 4:a+=k[3]<<24; case 3:a+=k[2]<<16; case 2:a+=k[1]<<8; case 1:a+=k[0];
-    }
-    a-=b;a-=c;a^=c>>13;b-=c;b-=a;b^=a<<8;c-=a;c-=b;c^=b>>13;
-    a-=b;a-=c;a^=c>>12;b-=c;b-=a;b^=a<<16;c-=a;c-=b;c^=b>>5;
-    a-=b;a-=c;a^=c>>3;b-=c;b-=a;b^=a<<10;c-=a;c-=b;c^=b>>15;
-    return c;
-}
-
-/* wrapper so we can use efs_dir directly */
-static uint32_t mph_lookup(const struct efs_dir *d, const char *key){
-    uint32_t len = (uint32_t)strlen(key);
-    uint32_t v = mph_lookup3((const uint8_t*)key, len, d->salt * 0x9e3779b9);
-    uint32_t a = v >> d->shift;
-    uint32_t b = v & (d->blen - 1);
-    uint32_t w = d->w;
-    uint32_t disp;
-    const uint8_t *tab = (const uint8_t*)(d + 1);
-    if (d->blen >= 4096) {
-        uint32_t idx = tab[b];
-        disp = tab_load(tab + d->blen + idx*w, w);
-    } else {
-        disp = tab_load(tab + b*w, w);
-    }
-    return (a ^ disp);
+/* The MPH decode lives in the selected MPH header (jmph.h by default). The
+ * reader supplies the four parameters stored in the directory header plus
+ * the table bytes that follow it; behaviour for a key outside the build set
+ * is undefined, so efs_lookup() verifies the matched name before trusting
+ * the index. */
+static uint32_t efs_dir_index(const struct efs_dir *d, const char *key){
+    return efs_mph_index((const uint8_t*)(d + 1), d->blen, d->shift, d->salt,
+                         d->w, key, (uint32_t)strlen(key));
 }
 
 /* ---- internal layout helpers ---- */
@@ -117,7 +65,11 @@ static const uint8_t  *dir_hashtab(const struct efs_dir *d){
     return (const uint8_t*)(d + 1);
 }
 static const uint32_t *dir_name_off(const struct efs_dir *d){
-    return (const uint32_t*)(dir_hashtab(d) + jmph_bytes(d->blen, d->w));
+    /* efs_mph_bytes(blen, w) is the unified table-size function: for jmph w
+     * is the displacement width; for BBHash blen is the level count and w is
+     * the key count (n), from which the level sizes are derived. Either way
+     * the size is computed from the stored params with no descriptor. */
+    return (const uint32_t*)(dir_hashtab(d) + efs_mph_bytes(d->blen, d->w));
 }
 static const uint32_t *dir_entry_off(const struct efs_dir *d){
     return dir_name_off(d) + d->count;
@@ -149,7 +101,7 @@ EFS_EXPORT const uint8_t *efs_lookup(const struct efs_dir *root, const char *pat
         const char *tryname = buf + 1;       /* start without leading '/' */
         const uint8_t *res = 0;
         for(int pass = 0; pass < 2; pass++){
-            uint32_t idx = mph_lookup(cur, tryname);
+            uint32_t idx = efs_dir_index(cur, tryname);
             if(idx < cur->count){
                 const uint32_t *noff = dir_name_off(cur);
                 const uint8_t *nm = dir_names(cur) + noff[idx];
@@ -191,24 +143,23 @@ EFS_EXPORT const char *efs_readdir(const struct efs_dir *dir, uint32_t *cursor){
 
 /*
  * =====================================================================
- *  EFS_BUILDER  -- Minimal perfect hash (MPH) generator.
+ *  MPH builder (EFS_BUILDER / MPH_IMPL)
  *
- *  Reusable, self-contained MPH builder. Define EFS_BUILDER before
- *  including efs.h to get `gen_mph()` plus its helpers. It has no
- *  dependency on the on-disk layout; the caller feeds keys and gets
- *  back a packed table (see struct mph_out) that the consumer code in
- *  EFS_IMPL reads back with the same parameters (blen/shift/salt/w).
+ *  The minimal perfect hash generator lives in the selected MPH header
+ *  (jmph.h by default; see efs_mph.h / UNIVERSAL-API-REVISED.md for how to
+ *  swap it). Define EFS_BUILDER (or MPH_IMPL) before including efs.h to
+ *  compile that header's builder, which exposes:
  *
- *  This is a minimal port of Bob Jenkins' perfect.c (public domain),
- *  www.burtleburtle.net/bob/c/perfect.c, specialised to the string
- *  hash (lookup/Jenkins "lookup2"). Highlights:
- *    * scramble[] is computed once (a fixed permutation of 0..smax-1)
- *      and reused across every salt trial, not recomputed each trial.
- *    * Keys are mapped in descending bucket-size order (largest
- *      buckets first), which is what makes the O(n) augmenting-path
- *      matching fast instead of O(n^2).
- *    * The table size blen only grows when a perfect hash genuinely
- *      cannot be built for the current salt, never on a slow attempt.
+ *      int      X_build(const struct X_in *in, struct X_out *out);
+ *      uint32_t X_index_p(tab, blen, shift, salt, w, key, klen);
+ *      uint32_t X_bytes(blen, w);
+ *
+ *  The builder feeds directory names to X_build() and gets back a packed
+ *  table plus the four parameters (blen/shift/salt/w) that are stored in
+ *  struct efs_dir; the consumer above reads the table back with X_index_p()
+ *  using those same parameters. There is no runtime algorithm descriptor:
+ *  an image is built against exactly one MPH implementation, chosen at
+ *  compile time.
  * =====================================================================
  */
 

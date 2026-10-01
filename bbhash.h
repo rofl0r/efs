@@ -1,5 +1,38 @@
-#ifndef MPH_H
-#define MPH_H
+#ifndef BBHASH_H
+#define BBHASH_H
+
+/*
+ * bbhash.h - single-header minimal perfect hash (BBHash / BoomPHF,
+ * arXiv:1702.03154), with the unified MPH API (see UNIVERSAL-API-REVISED.md).
+ *
+ * This is the oomph/mph.h library moved into the main directory and made
+ * self-contained (the treap from oomph/tlist.h is inlined below, on the
+ * builder path only). The oomph/ copy is kept as the historical source.
+ *
+ * Roles (single-header convention):
+ *   * PRODUCER : define MPH_IMPL (or EFS_BUILDER) in exactly one TU ->
+ *                mph_build() / mph_build_u() + the engine.
+ *   * CONSUMER : just include -> mph_lookup() / mph_index_p() / mph_bytes().
+ *
+ * On-disk byte order is BIG-ENDIAN (matching jmph's table storage, so both
+ * MPH implementations in this repo share one byte order). Every multi-byte
+ * value is read/written byte-by-byte, so the layout is host-endian agnostic.
+ *
+ * Unified API (shared shape with jmph.h):
+ *   struct mph_in  { uint32_t n; const char *const *keys; const uint32_t *kl; }
+ *   struct mph_out { uint8_t *data; uint32_t len, blen, shift, salt, w; }
+ *   int      mph_build_u(const struct mph_in *, struct mph_out *);
+ *   uint32_t mph_index_p(tab, blen, shift, salt, w, key, klen);   // 0-based
+ *   uint32_t mph_bytes(levels, n);  // exact serialized size (no descriptor)
+ *
+ * For BBHash the four consumer params map as: blen = num_levels, salt = hash
+ * seed, w = key count n, shift = 0 (unused). mph_bytes(levels, n) is exact
+ * because level sizes are deterministic functions of (levels, n).
+ *
+ * Standalone API (preserved): mph_build(keys, n, &len) -> blob, and
+ * mph_lookup(blob, len, key, keylen) -> 1-based rank (0 = not found).
+ */
+
 
 #if defined(__cplusplus)
 extern "C" {
@@ -46,8 +79,16 @@ extern "C" {
 #define MPH_API
 #endif
 
+/* MPH_DEF controls the linkage of the functions *defined* in this header.
+ * The default `static inline` makes the header safe to include from several
+ * TUs that later link together (e.g. efstest.o + efstest_builder.o); a
+ * standalone single-TU tool may `#define MPH_DEF extern` to export them. */
+#ifndef MPH_DEF
+#define MPH_DEF static inline
+#endif
+
 /* Consumer-facing lookup. Returns 0 on miss, else the 1-indexed rank. */
-MPH_API uint64_t mph_lookup(const uint8_t *table, size_t tablen,
+MPH_DEF uint64_t mph_lookup(const uint8_t *table, size_t tablen,
                             const char *key, size_t keylen);
 
 /* The builder (BBHash engine + serializer) is compiled under MPH_IMPL.
@@ -67,10 +108,250 @@ MPH_API uint64_t mph_lookup(const uint8_t *table, size_t tablen,
 #include <stddef.h>
 #include <stdio.h>
 
-/* tlist.h is used only on the builder path. */
+/* ---- tlist (treap) ------------------------------------------------
+ * Inlined from oomph/tlist.h so this header is self-contained. It is used
+ * only on the builder path (sorted key collection during the collision-free
+ * build), so compile its implementation here (we are already inside the
+ * MPH_IMPL/EFS_BUILDER builder section). */
+#ifndef TLIST_API
 #define TLIST_API static
+#endif
 #define TLIST_IMPL
-#include "tlist.h"
+typedef struct tlist tlist;
+
+/* Public API declarations. When TLIST_API is not defined, these get plain
+ * (extern) linkage so a consumer including this header only sees the prototypes.
+ * Definitions are emitted only when TLIST_IMPL is defined (in exactly one TU). */
+#ifndef TLIST_API
+#define TLIST_API extern
+#endif
+
+TLIST_API struct tlist *tlist_new(unsigned itemsize);
+TLIST_API size_t tlist_getsize(struct tlist *t);
+TLIST_API void *tlist_get(struct tlist *t, size_t idx);
+TLIST_API int tlist_insert(struct tlist *t, size_t idx, void *value);
+TLIST_API int tlist_insert_sorted(struct tlist *t, void *value,
+				  int (*cmp)(const void *, const void *));
+TLIST_API int tlist_delete(struct tlist *t, size_t idx);
+TLIST_API void tlist_free_items(struct tlist *t);
+TLIST_API void *tlist_free(struct tlist *t);
+
+#ifdef TLIST_IMPL
+
+#define TLIST_INTERNAL static
+
+#ifndef UINT_MAX
+#define UINT_MAX 0xffffffffU
+#endif
+
+#include <stdlib.h>
+#include <string.h>
+
+TLIST_INTERNAL int tlist_mrand(unsigned *seed)
+{
+	return ((*seed =
+		 (*seed + 1) * 1103515245 + 12345 - 1) + 1) & 0x7fffffff;
+}
+
+typedef struct item *pitem;
+struct item {
+	unsigned prior, cnt;
+	pitem l, r;
+};
+
+TLIST_INTERNAL unsigned tlist_cnt(pitem it)
+{
+	return it ? it->cnt : 0;
+}
+
+TLIST_INTERNAL void tlist_upd_cnt(pitem it)
+{
+	if (it)
+		it->cnt = tlist_cnt(it->l) + tlist_cnt(it->r) + 1;
+}
+
+TLIST_INTERNAL void tlist_merge(pitem * t, pitem l, pitem r)
+{
+	if (!l || !r)
+		*t = l ? l : r;
+	else if (l->prior > r->prior)
+		tlist_merge(&l->r, l->r, r), *t = l;
+	else
+		tlist_merge(&r->l, l, r->l), *t = r;
+	tlist_upd_cnt(*t);
+}
+
+TLIST_INTERNAL void tlist_split(pitem t, pitem * l, pitem * r, unsigned key,
+				unsigned add)
+{
+	if (!t) {
+		*l = *r = 0;
+		return;
+	}
+	unsigned cur_key = add + tlist_cnt(t->l);
+	if (key <= cur_key)
+		tlist_split(t->l, l, &t->l, key, add), *r = t;
+	else
+		tlist_split(t->r, &t->r, r, key, add + 1 + tlist_cnt(t->l)),
+		    *l = t;
+	tlist_upd_cnt(t);
+}
+
+TLIST_INTERNAL pitem tlist_getitem(pitem t, unsigned idx, unsigned add)
+{
+	if (!t)
+		return t;
+	unsigned ls = tlist_cnt(t->l), cur_key = add + ls;
+	if (cur_key == idx)
+		return t;
+	if (cur_key < idx)
+		return tlist_getitem(t->r, idx, add + 1 + ls);
+	else
+		return tlist_getitem(t->l, idx, add);
+}
+
+TLIST_INTERNAL void tlist_insert_item(pitem * t, pitem n, unsigned idx)
+{
+	pitem t1, t2;
+	tlist_split(*t, &t1, &t2, idx, 0);
+	tlist_merge(t, t1, n);
+	tlist_merge(t, *t, t2);
+}
+
+TLIST_INTERNAL void tlist_remove(pitem * t, unsigned idx, unsigned add)
+{
+	pitem n;
+	if (!(*t))
+		return;
+	unsigned cur_key = add + tlist_cnt((*t)->l), new_add = cur_key + 1;
+	unsigned lk = UINT_MAX, rk = UINT_MAX;
+	if ((*t)->l)
+		lk = tlist_cnt((*t)->l->l) + add;
+	if ((*t)->r)
+		rk = tlist_cnt((*t)->r->l) + new_add;
+	if (cur_key == idx) {
+		tlist_merge(t, (*t)->l, (*t)->r);
+	} else if (lk == idx) {
+		tlist_merge(&n, (*t)->l->l, (*t)->l->r);
+		(*t)->l = n;
+		tlist_upd_cnt(*t);
+	} else if (rk == idx) {
+		tlist_merge(&n, (*t)->r->l, (*t)->r->r);
+		(*t)->r = n;
+		tlist_upd_cnt(*t);
+	} else if (cur_key < idx) {
+		tlist_remove(&(*t)->r, idx, new_add);
+		tlist_upd_cnt(*t);
+	} else {
+		tlist_remove(&(*t)->l, idx, add);
+		tlist_upd_cnt(*t);
+	}
+}
+
+TLIST_INTERNAL pitem tlist_new_item(void *value, unsigned valsz, unsigned *seed)
+{
+	pitem n = malloc(sizeof(struct item) + valsz);
+	if (!n)
+		return n;
+	memcpy(n + 1, value, valsz);
+	n->prior = tlist_mrand(seed);
+	n->cnt = 1;
+	n->l = n->r = 0;
+	return n;
+}
+
+struct tlist {
+	unsigned seed;
+	unsigned itemsize;
+	pitem root;
+};
+
+TLIST_API struct tlist *tlist_new(unsigned itemsize)
+{
+	struct tlist *new = malloc(sizeof(struct tlist));
+	if (!new)
+		return 0;
+	new->seed = 385 - 1;
+	new->itemsize = itemsize;
+	new->root = 0;
+	return new;
+}
+
+TLIST_INTERNAL void *tlist_data(pitem it)
+{
+	return it + 1;
+}
+
+TLIST_API size_t tlist_getsize(struct tlist *t)
+{
+	return tlist_cnt(t->root);
+}
+
+TLIST_API void *tlist_get(struct tlist *t, size_t idx)
+{
+	if (idx >= tlist_cnt(t->root))
+		return 0;
+	return tlist_data(tlist_getitem(t->root, idx, 0));
+}
+
+TLIST_API int tlist_insert(struct tlist *t, size_t idx, void *value)
+{
+	if (idx > tlist_cnt(t->root))
+		return 0;
+	pitem new = tlist_new_item(value, t->itemsize, &t->seed);
+	if (!new)
+		return 0;
+	tlist_insert_item(&t->root, new, idx);
+	return 1;
+}
+
+TLIST_API int tlist_insert_sorted(struct tlist *t, void *value,
+			       int (*cmp)(const void *, const void *))
+{
+	size_t lo = 0, hi = tlist_getsize(t);
+	while (lo < hi) {
+		size_t mid = (lo & hi) + ((lo ^ hi) >> 1);
+		void *cur = tlist_get(t, mid);
+		if (cmp(value, cur) < 0)
+			hi = mid;
+		else
+			lo = mid + 1;
+	}
+	return tlist_insert(t, lo, value);
+}
+
+TLIST_INTERNAL int tlist_delete_impl(struct tlist *t, size_t idx)
+{
+	if (idx >= tlist_cnt(t->root))
+		return 0;
+	pitem it = tlist_getitem(t->root, idx, 0);
+	tlist_remove(&t->root, idx, 0);
+	free(it);
+	return 1;
+}
+
+TLIST_API int tlist_delete(struct tlist *t, size_t idx)
+{
+	return tlist_delete_impl(t, idx);
+}
+
+TLIST_API void tlist_free_items(struct tlist *t)
+{
+	while (tlist_cnt(t->root))
+		tlist_delete_impl(t, 0);
+}
+
+TLIST_API void *tlist_free(struct tlist *t)
+{
+	tlist_free_items(t);
+	free(t);
+	return 0;
+}
+
+#undef TLIST_INTERNAL
+
+#endif /* TLIST_IMPL */
+
 
 /* ------------------------------------------------------------------ */
 /* Popcount: use the platform builtin when available, else footwork.  */
@@ -473,7 +754,7 @@ MPH_INTERNAL uint8_t *mph_build_impl(const char * const *keys, const uint32_t *k
 }
 
 /* Standalone API (unchanged contract): blob from NUL-terminated keys. */
-MPH_API uint8_t *mph_build(const char * const *keys, size_t n_keys,
+MPH_DEF uint8_t *mph_build(const char * const *keys, size_t n_keys,
                            size_t *out_len) {
     uint32_t blen, salt;
     return mph_build_impl(keys, NULL, n_keys, out_len, &blen, &salt);
@@ -557,7 +838,7 @@ static inline uint64_t mph_rd_u64_at(const uint8_t *p) {
 }
 #endif
 
-MPH_API uint64_t mph_lookup(const uint8_t *table, size_t tablen,
+MPH_DEF uint64_t mph_lookup(const uint8_t *table, size_t tablen,
                             const char *key, size_t keylen) {
     if (!table || tablen < 5) return 0; /* need num_levels(u8)+seed(u32) at least */
     const uint8_t *p = table;
@@ -638,21 +919,21 @@ struct mph_out {
  * (bitsize_i = ceil64(2 * n_i), n_i = ceil(n / 2^i)), so the size needs no
  * descriptor -- exactly like jmph's jmph_bytes(blen, w). For the exact size
  * of a concrete table use mph_out.len from mph_build_u(). */
-MPH_API uint32_t mph_bytes(uint32_t levels, uint32_t n);
+MPH_DEF uint32_t mph_bytes(uint32_t levels, uint32_t n);
 
 /* Unified build: 1 on success (out filled, out->data malloc'd), 0 on
  * duplicate keys / OOM. Keys must be unique. */
-MPH_API int mph_build_u(const struct mph_in *in, struct mph_out *out);
+MPH_DEF int mph_build_u(const struct mph_in *in, struct mph_out *out);
 
 /* Unified decode: 0-based index of key[0..klen), reading the table bytes
  * with the four stored params. The blob's own 5-byte header carries
  * num_levels and seed; blen/salt are accepted (and validated against the
  * blob) for signature compatibility with the other MPH implementations. */
-MPH_API uint32_t mph_index_p(const uint8_t *tab, uint32_t blen, uint32_t shift,
+MPH_DEF uint32_t mph_index_p(const uint8_t *tab, uint32_t blen, uint32_t shift,
                              uint32_t salt, uint32_t w,
                              const char *key, uint32_t klen);
 
-MPH_API uint32_t mph_bytes(uint32_t levels, uint32_t n){
+MPH_DEF uint32_t mph_bytes(uint32_t levels, uint32_t n){
     /* Mirrors the deterministic level sizing in mph_new_boomphf exactly:
      * level i is sized for planned_i = ceil(n / 2^i), bitsize_i =
      * max(64, ceil64(2 * planned_i)). */
@@ -668,7 +949,7 @@ MPH_API uint32_t mph_bytes(uint32_t levels, uint32_t n){
     return total > 0xffffffffu ? 0 : (uint32_t)total;
 }
 
-MPH_API uint32_t mph_index_p(const uint8_t *tab, uint32_t blen, uint32_t shift,
+MPH_DEF uint32_t mph_index_p(const uint8_t *tab, uint32_t blen, uint32_t shift,
                              uint32_t salt, uint32_t w,
                              const char *key, uint32_t klen){
     (void)shift; (void)salt;
@@ -686,7 +967,7 @@ MPH_API uint32_t mph_index_p(const uint8_t *tab, uint32_t blen, uint32_t shift,
  * to preserve oomph's original two-role model. */
 #if defined(MPH_IMPL) || defined(EFS_BUILDER)
 
-MPH_API int mph_build_u(const struct mph_in *in, struct mph_out *out){ /* builder */
+MPH_DEF int mph_build_u(const struct mph_in *in, struct mph_out *out){ /* builder */
     *out = (struct mph_out){0};
     if (!in) return 0;
     size_t len = 0;
@@ -709,4 +990,4 @@ MPH_API int mph_build_u(const struct mph_in *in, struct mph_out *out){ /* builde
 }
 #endif
 
-#endif /* MPH_H */
+#endif /* BBHASH_H */

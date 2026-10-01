@@ -61,40 +61,62 @@ extern "C" {
 /* ------------------------------------------------------------------ */
 
 /* Build input: n keys, each a NUL-terminated string with length kl[i].
- * keys/kl are caller-owned; the builder does not free them. kl is uint16_t
- * because efs keys are per-directory file names, which are bounded by the
- * NAME_MAX/component limit (<= 4 KB even under PATH_MAX), so a 16-bit
- * length wastes less memory and uses cache better than uint32_t. */
+ * keys/kl are caller-owned; the builder does not free them. kl is uint32_t
+ * to match the unified MPH API shape (see UNIVERSAL-API-REVISED.md); for
+ * efs the keys are per-directory file names, bounded by the component limit
+ * (< 4096 even under PATH_MAX), so the values are always small. */
 struct jmph_in {
     uint32_t   n;      /* number of keys */
     const char **keys; /* key strings (NUL-terminated) */
-    uint16_t   *kl;    /* key lengths (< 4096) */
+    uint32_t   *kl;    /* key lengths (< 4096 for efs) */
 };
 
-/* Build output: a packed MPH table. Caller frees data with free(). */
+/* Build output: a packed MPH table plus the four parameters the consumer
+ * must store alongside it (blen/shift/salt/w) to decode it later.
+ * Caller frees data with free(). */
 struct jmph_out {
     uint32_t  blen;  /* table size (power of two, >= 2) */
     uint32_t  shift; /* a = hash >> shift */
     uint32_t  salt;  /* seed passed to the string hash */
     uint32_t  w;     /* bytes per scramble/disp entry (1..4) */
+    uint32_t  len;   /* == jmph_bytes(blen, w); serialized size of data */
     uint8_t  *data;  /* packed table; free() with free() */
 };
+
+/* The public functions are defined in this header, so they must be safe to
+ * include from several TUs that later link together (efstest.o +
+ * efstest_builder.o). JMPH_DEF controls their linkage; the default
+ * `static inline` gives each TU its own copy. A standalone single-TU tool
+ * may `#define JMPH_DEF extern` before including to export them instead.
+ * (JMPH_DEF must precede the declarations, so it is set here, not later.) */
+#ifndef JMPH_DEF
+#define JMPH_DEF static inline
+#endif
 
 /* Exact serialized size of a built table (blen/w). This is part of the
  * MPH layout, so it lives here in jmph.h (the on-disk efs consumer calls
  * it to skip past the hash table). */
-JMPH_API uint32_t jmph_bytes(uint32_t blen, uint32_t w);
+JMPH_DEF uint32_t jmph_bytes(uint32_t blen, uint32_t w);
 
 /* Map `key` (klen bytes) to its unique slot in [0, blen-1], which is
  * [0, n-1] for a minimal perfect hash. This is the exact inverse of
  * the consumer-side decode and is what callers should use instead of
  * re-implementing it. */
-JMPH_API uint32_t jmph_index(const struct jmph_out *mo, const uint8_t *key, uint32_t klen);
+JMPH_DEF uint32_t jmph_index(const struct jmph_out *mo, const uint8_t *key, uint32_t klen);
+
+/* Unified-API decode: same as jmph_index() but takes the raw table pointer
+ * and the four parameters directly, which is what a consumer has after
+ * reading them back from storage (e.g. the efs_dir header). Behaviour for a
+ * key that was not in the build set is undefined (efs verifies the matched
+ * name, so this is safe there). */
+JMPH_DEF uint32_t jmph_index_p(const uint8_t *tab, uint32_t blen, uint32_t shift,
+                               uint32_t salt, uint32_t w,
+                               const char *key, uint32_t klen);
 
 /* Build a minimal perfect hash for the given (unique) keys.
  * Returns 1 on success (out->data allocated; free with free()),
  * 0 on failure (out->data is NULL). Duplicate keys yield 0. */
-JMPH_API int jmph_build(const struct jmph_in *in, struct jmph_out *out);
+JMPH_DEF int jmph_build(const struct jmph_in *in, struct jmph_out *out);
 
 /* ------------------------------------------------------------------ */
 /* Implementation (builder path only).                               */
@@ -102,36 +124,32 @@ JMPH_API int jmph_build(const struct jmph_in *in, struct jmph_out *out);
 
 /* jmph_bytes is needed by the efs consumer (to locate the name table),
  * so its definition is always available, not just on the builder path. */
-JMPH_API uint32_t jmph_bytes(uint32_t blen, uint32_t w){
+JMPH_DEF uint32_t jmph_bytes(uint32_t blen, uint32_t w){
     return (blen >= USE_SCRAMBLE) ? (blen + 256 * w) : (blen * w);
 }
 
-#if defined(MPH_IMPL) || defined(EFS_BUILDER)
+/* ------------------------------------------------------------------ */
+/* Always-visible decode path.                                         */
+/*                                                                     */
+/* jmph_lookup_k / jmph_tab_load / jmph_index_p are the *consumer* side  */
+/* of the MPH: they decode a packed table given only its four stored     */
+/* parameters. The on-disk efs reader uses them and does NOT define      */
+/* MPH_IMPL/EFS_BUILDER, so they must be available to every includer.    */
+/* The builder (below) reuses the identical hash so the table it writes  */
+/* decodes correctly.                                                    */
+/* ------------------------------------------------------------------ */
 
-#ifndef JMPH_INTERNAL
-#define JMPH_INTERNAL static
-#endif
-
-#include <stdlib.h>
-#include <stdio.h>
-#include <string.h>
-
-JMPH_INTERNAL uint32_t jmph_mylog2(uint32_t v){
-    uint32_t i;
-    for(i = 0; ((uint32_t)1 << i) < v; i++)
-        ;
-    return i;
-}
-
-/* Jenkins "lookup2" mix; must match the hash used by the consumer. */
+/* Jenkins "lookup2" mix; must match the hash used by the builder. */
+#ifndef jmph_mix
 #define jmph_mix(a,b,c) \
 { a-=b;a-=c;a^=c>>13;b-=c;b-=a;b^=a<<8;c-=a;c-=b;c^=b>>13; \
   a-=b;a-=c;a^=c>>12;b-=c;b-=a;b^=a<<16;c-=a;c-=b;c^=b>>5; \
   a-=b;a-=c;a^=c>>3;b-=c;b-=a;b^=a<<10;c-=a;c-=b;c^=b>>15; }
+#endif
 
-/* Hash a key to a 32-bit value; the consumer uses the identical mix so
- * the same salt reproduces the same hash on the read side. */
-JMPH_INTERNAL uint32_t jmph_lookup_k(const uint8_t *k, uint32_t len, uint32_t level){
+/* Hash a key to a 32-bit value; the builder uses the identical mix so the
+ * same salt reproduces the same hash on the read side. */
+JMPH_DEF uint32_t jmph_lookup_k(const uint8_t *k, uint32_t len, uint32_t level){
     uint32_t a, b, c, o = len;
     a = b = 0x9e3779b9;
     c = level;
@@ -153,6 +171,50 @@ JMPH_INTERNAL uint32_t jmph_lookup_k(const uint8_t *k, uint32_t len, uint32_t le
     return c;
 }
 
+/* Read a big-endian w-byte word (w <= 4). */
+JMPH_DEF uint32_t jmph_tab_load(const uint8_t *p, uint32_t w){
+    uint32_t v = 0;
+    while(w--) v = (v << 8) | *p++;
+    return v;
+}
+
+JMPH_DEF uint32_t jmph_index_p(const uint8_t *tab, uint32_t blen, uint32_t shift,
+                               uint32_t salt, uint32_t w,
+                               const char *key, uint32_t klen){
+    uint32_t v = jmph_lookup_k((const uint8_t*)key, klen, salt * 0x9e3779b9);
+    uint32_t a = v >> shift;
+    uint32_t b = v & (blen - 1);
+    uint32_t disp;
+    if(blen >= USE_SCRAMBLE){
+        uint32_t idx = tab[b];
+        disp = jmph_tab_load(tab + blen + idx * w, w);
+    } else {
+        disp = jmph_tab_load(tab + b * w, w);
+    }
+    return a ^ disp;
+}
+
+#if defined(MPH_IMPL) || defined(EFS_BUILDER)
+
+#ifndef JMPH_INTERNAL
+#define JMPH_INTERNAL static
+#endif
+
+#include <stdlib.h>
+#include <stdio.h>
+#include <string.h>
+
+/* jmph_mix, jmph_lookup_k and jmph_tab_load are defined above in the
+ * always-visible decode section (the consumer shares them); the builder
+ * reuses them so the table it writes decodes correctly on the read side. */
+
+JMPH_INTERNAL uint32_t jmph_mylog2(uint32_t v){
+    uint32_t i;
+    for(i = 0; ((uint32_t)1 << i) < v; i++)
+        ;
+    return i;
+}
+
 /* permutation p(x) of 0..(1<<nbits)-1, used to fill scramble[] */
 JMPH_INTERNAL uint32_t jmph_permute(uint32_t x, uint32_t nbits){
     uint32_t mask = ((uint32_t)1 << nbits) - 1;
@@ -164,13 +226,6 @@ JMPH_INTERNAL uint32_t jmph_permute(uint32_t x, uint32_t nbits){
         x = x ^ (x >> c5);
     }
     return x;
-}
-
-/* Read a big-endian w-byte word (w <= 4). */
-JMPH_INTERNAL uint32_t jmph_tab_load(const uint8_t *p, uint32_t w){
-    uint32_t v = 0;
-    while(w--) v = (v << 8) | *p++;
-    return v;
 }
 
 /* Per-bucket working state for the matcher. */
@@ -343,22 +398,12 @@ JMPH_INTERNAL void jmph_initalen(uint32_t n, uint32_t smax, uint32_t *alen, uint
     if(*alen < 2) *alen = 2;
 }
 
-JMPH_API uint32_t jmph_index(const struct jmph_out *mo, const uint8_t *key, uint32_t klen){
-    uint32_t v = jmph_lookup_k(key, klen, mo->salt * 0x9e3779b9);
-    uint32_t a = v >> mo->shift;
-    uint32_t b = v & (mo->blen - 1);
-    uint32_t w = mo->w;
-    uint32_t disp;
-    if(mo->blen >= USE_SCRAMBLE){
-        uint32_t idx = mo->data[b];
-        disp = jmph_tab_load(mo->data + mo->blen + idx * w, w);
-    } else {
-        disp = jmph_tab_load(mo->data + b * w, w);
-    }
-    return a ^ disp;
+JMPH_DEF uint32_t jmph_index(const struct jmph_out *mo, const uint8_t *key, uint32_t klen){
+    return jmph_index_p(mo->data, mo->blen, mo->shift, mo->salt, mo->w,
+                        (const char*)key, klen);
 }
 
-JMPH_API int jmph_build(const struct jmph_in *in, struct jmph_out *out){
+JMPH_DEF int jmph_build(const struct jmph_in *in, struct jmph_out *out){
     *out = (struct jmph_out){0};
     const uint32_t n = in->n;
 
@@ -367,7 +412,8 @@ JMPH_API int jmph_build(const struct jmph_in *in, struct jmph_out *out){
         out->shift = 31;
         out->salt = 0;
         out->w = 1;
-        out->data = calloc(1, jmph_bytes(1, 1));
+        out->len = jmph_bytes(1, 1);
+        out->data = calloc(1, out->len);
         return out->data ? 1 : 0;
     }
 
@@ -434,6 +480,7 @@ JMPH_API int jmph_build(const struct jmph_in *in, struct jmph_out *out){
                 out->data[j] = (disp0 >> (8*(w-1-j))) & 0xFF;
         }
         out->w = w; out->blen = 1; out->shift = shift; out->salt = salt;
+        out->len = total_bytes;
         free(scramble); free(vbuf); free(ka); free(kb); free(tabb);
         free(flat_list); free(counts); free(order); free(tabh); free(tabq);
         return 1;
@@ -543,6 +590,7 @@ JMPH_API int jmph_build(const struct jmph_in *in, struct jmph_out *out){
     out->blen = blen;
     out->shift = shift;
     out->salt = salt;
+    out->len = total_bytes;
 
     free(scramble);
     free(vbuf); free(ka); free(kb); free(tabb); free(flat_list);
