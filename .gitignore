@@ -2,4 +2,8 @@ efsbuilder
 efsreader
 efstest
 jmph_test
+oomph/boomphf
+oomph/soomph
+oomph/goomph
+oomph/mph_builder
 *.o
