@@ -34,9 +34,9 @@ descriptor, no format change.
    in the image** to identify the algorithm. The image *is* a jmph image or
    an oomph image because you built it that way.
 3. **Parameters the consumer needs travel in the directory header** — exactly
-   as EFS v1 already does (`blen, salt, shift, w`). This is why jmph is the
-   natural fit: its parameters *are* the v1 header fields. oomph is adapted
-   to the same parameter model so it can fill the same header.
+   as EFS v1 already does (`blen, salt, shift, w`). Each algorithm assigns its
+   own meanings to those shared slots; in particular, `w` remains jmph's
+   displacement width but carries BBHash's serialized table length.
 4. **0-based indexing everywhere.** EFS already works in 0-based indices; the
    unified shape returns 0-based. oomph's native 1-based rank is converted
    inside its own header (still "usable on its own", just with the unified
@@ -153,17 +153,12 @@ public surface and serialization change.
 - **Map BBHash onto the four params** so one `efs_dir` header serves both:
   - `salt`  → the collision-free hash seed (BBHash already finds one).
   - `blen`  → number of BBHash levels.
-  - `shift` → gamma numerator/scale used (so the consumer sizes level 0), or
-    0 if the decoder recomputes from `n`.
-  - `w`     → unused (set 0) — BBHash has no displacement width.
-  The consumer needs `n` too, which EFS already stores as `efs_dir.count`.
-- **`mph_bytes(blen, w)`** returns the serialized size of a `blen`-level
-  table. For BBHash the per-level `bitsize`s must be derivable without a
-  descriptor, so fix the level sizing rule to a pure function of `(n, level)`
-  — e.g. `bitsize_i = round_up_64(gamma * remaining_i)` with the standard
-  geometric decay — letting the decoder walk the levels and compute the total
-  size. (This is the one place oomph gives up its current self-describing
-  blob in exchange for zero header bytes.)
+  - `shift` → unused (0).
+  - `w`     → serialized table length, used to bounds-check `mph_lookup`.
+- **`mph_bytes(blen, w)`** returns `w` for BBHash. The builder knows the exact
+  blob length and stores it in the existing field; the decoder reads level
+  counts from the blob itself. Level sizing can therefore remain
+  collision-dependent without adding a descriptor or changing the header.
 - **0-based contract:** `mph_index_p` returns `rank - 1` (BBHash's internal
   1-based rank), reconciling the APIs without a wrapper layer.
 - **Empty keys / empty set:** handled per the unified contract — `n == 0`
@@ -291,7 +286,7 @@ No new objects; `efs_mph.h` is header-only and each MPH stays single-header.
 | File | Change |
 |------|--------|
 | `jmph.h` | add `len` to `jmph_out`; widen `jmph_in.kl` to `uint32_t`; add `jmph_index_p()` (the decode, moved in from `efs.h`); keep `jmph_index()` as a wrapper. No algorithm change. |
-| `oomph/mph.h` | adopt the unified shape natively (`mph_in`/`mph_out`/`mph_build`/`mph_index_p`/`mph_bytes`); 0-based indices; derive level sizes so no descriptor is needed; **fix the three pre-existing bugs** (double-free, endianness, hash mismatch). Engine unchanged. |
+| `oomph/mph.h` | adopt the unified shape natively (`mph_in`/`mph_out`/`mph_build`/`mph_index_p`/`mph_bytes`); 0-based indices; store the blob length in `w` for bounds checking; **fix the three pre-existing bugs** (double-free, endianness, hash mismatch). Engine unchanged. |
 | `efs_mph.h` | **new, header-only** compile-time selector (§4.1). |
 | `efs.h` | include `efs_mph.h`; delete inline jmph decode; `mph_lookup` + layout helpers call the unified functions; `struct efs_dir` unchanged. |
 | `efsbuilder.c` | use generic names; `uint32_t kl[]`; copy the four params to the header. |
