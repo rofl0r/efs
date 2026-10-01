@@ -91,7 +91,8 @@ for n in $CHECK_N; do
     mph_ns_sum=0
     mph_bytes_sum=0
     image_bytes_sum=0
-    while ((total_ns_sum < MIN_BUILD_SECONDS * 1000000000)); do
+    batch_start=$SECONDS
+    while ((SECONDS - batch_start < MIN_BUILD_SECONDS)); do
         if ((DROP_CACHES)); then
             sync
             printf '3\n' > /proc/sys/vm/drop_caches
