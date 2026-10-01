@@ -13,6 +13,10 @@
  *   4. checks the recursive directory-listing (names + kinds) matches,
  *   5. confirms an absent name is reported "not found".
  *
+ * Optional benchmark flags:
+ *   --bench-stats  print build time, total MPH bytes, and whole-image bytes.
+ *   --cold-cache   advise the kernel to evict source/image file data.
+ *
  * Cleanup: a generated temporary directory is deleted on success and left in
  * place (path printed) on failure, for inspection. A user-supplied directory
  * is never deleted. Exit status 0 = pass, 1 = fail.
@@ -35,6 +39,7 @@
 #include <unistd.h>
 #include <sys/stat.h>
 #include <sys/mman.h>
+#include <time.h>
 
 /* ---- deterministic PRNG (xorshift64*) --------------------------------- */
 
@@ -138,6 +143,45 @@ static int gen_tree(long n, unsigned seed){
 
 static const struct efs_dir *g_root;
 static uint32_t g_checked, g_failed;
+static uint64_t g_hash_table_bytes;
+static int g_bench_stats;
+static int g_cold_cache;
+
+static uint64_t monotonic_ns(void){
+    struct timespec ts;
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) return 0;
+    return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
+}
+
+static void evict_tree(const char *path){
+    DIR *d = opendir(path);
+    if (!d) return;
+    struct dirent *de;
+    while ((de = readdir(d))){
+        if (!strcmp(de->d_name, ".") || !strcmp(de->d_name, "..")) continue;
+        char child[4096];
+        snprintf(child, sizeof child, "%s/%s", path, de->d_name);
+        struct stat st;
+        if (lstat(child, &st) != 0) continue;
+        if (S_ISDIR(st.st_mode)) evict_tree(child);
+        else {
+            int fd = open(child, O_RDONLY);
+            if (fd >= 0){
+                (void)posix_fadvise(fd, 0, 0, POSIX_FADV_DONTNEED);
+                close(fd);
+            }
+        }
+    }
+    closedir(d);
+}
+
+static void evict_file(const char *path){
+    int fd = open(path, O_RDONLY);
+    if (fd >= 0){
+        (void)posix_fadvise(fd, 0, 0, POSIX_FADV_DONTNEED);
+        close(fd);
+    }
+}
 
 static int cmp_str(const void *a, const void *b){ return strcmp(*(char*const*)a, *(char*const*)b); }
 
@@ -193,6 +237,7 @@ static void verify_dir(const char *srcpath, const char *efspath){
     const uint8_t *dp = efs_lookup(g_root, efspath, &dl, &ddir);
     if (!dp || !ddir){ printf("DIR NOT FOUND: %s\n", efspath); g_failed++; sv_free(&src); return; }
     const struct efs_dir *sub = (const struct efs_dir*)dp;
+    g_hash_table_bytes += efs_mph_bytes(sub->blen, sub->w);
     struct strvec got = {0};
     uint32_t cur = 0; const char *nm;
     while ((nm = efs_readdir(sub, &cur))){
@@ -242,6 +287,8 @@ int main(int argc, char **argv){
     for (int i = 1; i < argc; i++){
         if (!strcmp(argv[i], "-n") && i+1 < argc) n = atol(argv[++i]);
         else if (!strcmp(argv[i], "-s") && i+1 < argc) seed = (unsigned)strtoul(argv[++i],0,0);
+        else if (!strcmp(argv[i], "--bench-stats")) g_bench_stats = 1;
+        else if (!strcmp(argv[i], "--cold-cache")) g_cold_cache = 1;
         else target = argv[i];
     }
 
@@ -253,18 +300,26 @@ int main(int argc, char **argv){
         return 1;
     }
 
+    if (g_cold_cache) evict_tree(target);
+
     /* build the image */
     char img[4096]; snprintf(img, sizeof img, "%s.efs", g_generated ? g_tmpdir : "/tmp/efstest_img");
+    uint64_t build_start = monotonic_ns();
     if (efs_build_path(target, img) != 0){
         fprintf(stderr, "efs_build_path failed for %s\n", target);
         if (g_generated) printf("kept temp dir for inspection: %s\n", g_tmpdir);
         return 1;
     }
+    uint64_t build_ns = monotonic_ns() - build_start;
 
     /* mmap the image */
     int fd = open(img, O_RDONLY);
     if (fd < 0){ perror("open image"); return 1; }
     struct stat st; fstat(fd, &st);
+    if (g_cold_cache){
+        evict_tree(target);
+        (void)posix_fadvise(fd, 0, 0, POSIX_FADV_DONTNEED);
+    }
     uint8_t *base = mmap(0, st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
     if (base == MAP_FAILED){ perror("mmap"); close(fd); return 1; }
     if (memcmp(base, EFS_MAGIC, 4) != 0){ fprintf(stderr,"bad magic\n"); return 1; }
@@ -277,6 +332,13 @@ int main(int argc, char **argv){
     uint32_t l; int id;
     if (efs_lookup(g_root, "/definitely-not-a-real-name-zzz", &l, &id) != NULL){
         printf("FALSE POSITIVE: absent name resolved\n"); g_failed++;
+    }
+
+    if (g_bench_stats){
+        double mph_pct = st.st_size ? 100.0 * (double)g_hash_table_bytes / (double)st.st_size : 0.0;
+        printf("BENCH files=%ld seed=%u build_ns=%llu mph_bytes=%llu image_bytes=%lld mph_pct=%.3f\n",
+               n, seed, (unsigned long long)build_ns,
+               (unsigned long long)g_hash_table_bytes, (long long)st.st_size, mph_pct);
     }
 
     munmap(base, st.st_size);
