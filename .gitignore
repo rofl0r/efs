@@ -1,3 +1,5 @@
 efsbuilder
 efsreader
+efstest
+jmph_test
 *.o
