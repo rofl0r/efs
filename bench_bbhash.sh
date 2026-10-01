@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # Reproducible EFS/BBHash benchmark. Run from any directory:
 #   CHECK_N="100 1000 2000" MIN_BUILD_SECONDS=5 ./bench_bbhash.sh
-#   ./bench_bbhash.sh --bbhash-ref f6ad143
+#   ./bench_bbhash.sh --bbhash-ref c0162f4578ddbb066a944d23f0dc35ddc86254b0
 #
 # The test runner reports MPH bytes (summed over every directory), full image
-# bytes, their ratio, and EFS build time. Build time excludes key-tree
-# generation and correctness verification.
+# bytes, their ratio, time spent inside MPH builders, and total EFS build time.
+# The timed batch lasts at least MIN_BUILD_SECONDS wall-clock seconds per set.
 #
 # --bbhash-ref REF benchmarks the BBHash header from an existing git revision
 # using the current test runner and EFS sources (for before/after comparisons).
@@ -53,13 +53,24 @@ fi
 
 BUILD_DIR=$(mktemp -d "${TMPDIR:-/tmp}/efs-bbhash-bench.XXXXXX")
 trap 'rm -rf "$BUILD_DIR"' EXIT
-for source in Makefile efs.h efs_mph.h efsbuilder.c efstest.c jmph.h bbhash.h; do
+for source in Makefile efs.h efs_mph.h efsbuilder.c efstest.c jmph.h bbhash.h oomph/tlist.h; do
+    mkdir -p "$BUILD_DIR/$(dirname "$source")"
     cp "$ROOT/$source" "$BUILD_DIR/$source"
 done
+cp "$ROOT/oomph/tlist.h" "$BUILD_DIR/tlist.h"
 if [[ -n $BBHASH_REF ]]; then
-    git -C "$ROOT" show "$BBHASH_REF:bbhash.h" > "$BUILD_DIR/bbhash.h"
+    if git -C "$ROOT" cat-file -e "$BBHASH_REF:bbhash.h" 2>/dev/null; then
+        BBHASH_PATH=bbhash.h
+    elif git -C "$ROOT" cat-file -e "$BBHASH_REF:oomph/mph.h" 2>/dev/null; then
+        BBHASH_PATH=oomph/mph.h
+    else
+        echo "no bbhash.h or oomph/mph.h at revision $BBHASH_REF" >&2
+        exit 2
+    fi
+    git -C "$ROOT" show "$BBHASH_REF:$BBHASH_PATH" > "$BUILD_DIR/bbhash.h"
 fi
-make -C "$BUILD_DIR" MPH=BBHASH efstest
+make -C "$BUILD_DIR" MPH=BBHASH \
+    CFLAGS="${CFLAGS:-} -DEFS_BENCH -DMPH_API=static" efstest
 
 field(){
     awk -v key="$1" '{for(i=1;i<=NF;i++) if(index($i,key "=")==1){sub(key "=","",$i); print $i; exit}}'
@@ -69,16 +80,18 @@ printf '# revision=%s seed=%s minimum_build_seconds=%s drop_caches=%s\n' \
     "$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo unknown)" \
     "$SEED" "$MIN_BUILD_SECONDS" "$DROP_CACHES"
 if [[ -n $BBHASH_REF ]]; then
-    printf '# bbhash_ref=%s\n' "$BBHASH_REF"
+    printf '# bbhash_ref=%s:%s\n' "$BBHASH_REF" "$BBHASH_PATH"
 fi
-printf 'files\trounds\tavg_build_ms\tavg_mph_bytes\tavg_image_bytes\tmph_pct_image\n'
+printf 'files\trounds\tavg_mph_ms\tavg_image_build_ms\tavg_total_ms\tavg_mph_bytes\tavg_image_bytes\tmph_pct_image\n'
 
 for n in $CHECK_N; do
     rounds=0
+    total_ns_sum=0
     build_ns_sum=0
+    mph_ns_sum=0
     mph_bytes_sum=0
     image_bytes_sum=0
-    while ((build_ns_sum < MIN_BUILD_SECONDS * 1000000000)); do
+    while ((total_ns_sum < MIN_BUILD_SECONDS * 1000000000)); do
         if ((DROP_CACHES)); then
             sync
             printf '3\n' > /proc/sys/vm/drop_caches
@@ -90,16 +103,22 @@ for n in $CHECK_N; do
             exit 1
         fi
         build_ns=$(printf '%s\n' "$line" | field build_ns)
+        mph_ns=$(printf '%s\n' "$line" | field mph_ns)
+        total_ns=$(printf '%s\n' "$line" | field total_ns)
         mph_bytes=$(printf '%s\n' "$line" | field mph_bytes)
         image_bytes=$(printf '%s\n' "$line" | field image_bytes)
         ((rounds+=1))
+        ((total_ns_sum+=total_ns))
         ((build_ns_sum+=build_ns))
+        ((mph_ns_sum+=mph_ns))
         ((mph_bytes_sum+=mph_bytes))
         ((image_bytes_sum+=image_bytes))
     done
-    awk -v n="$n" -v rounds="$rounds" -v build="$build_ns_sum" \
+    awk -v n="$n" -v rounds="$rounds" -v total="$total_ns_sum" \
+        -v build="$build_ns_sum" -v mph_ns="$mph_ns_sum" \
         -v mph="$mph_bytes_sum" -v image="$image_bytes_sum" \
-        'BEGIN { printf "%s\t%d\t%.3f\t%.1f\t%.1f\t%.3f%%\n", n, rounds,
-                 build/rounds/1000000, mph/rounds, image/rounds,
+        'BEGIN { printf "%s\t%d\t%.3f\t%.3f\t%.3f\t%.1f\t%.1f\t%.3f%%\n", n, rounds,
+                 mph_ns/rounds/1000000, build/rounds/1000000,
+                 total/rounds/1000000, mph/rounds, image/rounds,
                  image ? 100*mph/image : 0 }'
 done
