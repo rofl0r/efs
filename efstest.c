@@ -26,7 +26,6 @@
  */
 
 #define EFS_IMPL
-#define EFS_BUILDER
 #include "efs.h"
 
 #include <stdio.h>
@@ -146,6 +145,9 @@ static uint32_t g_checked, g_failed;
 static uint64_t g_hash_table_bytes;
 static int g_bench_stats;
 static int g_cold_cache;
+#ifdef EFS_BENCH
+extern uint64_t efs_mph_build_ns;
+#endif
 
 static uint64_t monotonic_ns(void){
     struct timespec ts;
@@ -291,6 +293,7 @@ int main(int argc, char **argv){
         else if (!strcmp(argv[i], "--cold-cache")) g_cold_cache = 1;
         else target = argv[i];
     }
+    uint64_t run_start = monotonic_ns();
 
     if (n >= 0){
         if (gen_tree(n, seed) != 0) return 1;
@@ -336,8 +339,14 @@ int main(int argc, char **argv){
 
     if (g_bench_stats){
         double mph_pct = st.st_size ? 100.0 * (double)g_hash_table_bytes / (double)st.st_size : 0.0;
-        printf("BENCH files=%ld seed=%u build_ns=%llu mph_bytes=%llu image_bytes=%lld mph_pct=%.3f\n",
-               n, seed, (unsigned long long)build_ns,
+        printf("BENCH files=%ld seed=%u total_ns=%llu build_ns=%llu mph_ns=%llu mph_bytes=%llu image_bytes=%lld mph_pct=%.3f\n",
+               n, seed, (unsigned long long)(monotonic_ns() - run_start),
+               (unsigned long long)build_ns,
+#ifdef EFS_BENCH
+               (unsigned long long)efs_mph_build_ns,
+#else
+               0ULL,
+#endif
                (unsigned long long)g_hash_table_bytes, (long long)st.st_size, mph_pct);
     }
 

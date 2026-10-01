@@ -23,11 +23,22 @@
 #include <dirent.h>
 #include <errno.h>
 #include <sys/stat.h>
+#include <time.h>
 
 #define u32 uint32_t
 #define u8 uint8_t
 
 #define COPY_CHUNK 16384
+
+#ifdef EFS_BENCH
+uint64_t efs_mph_build_ns;
+
+static uint64_t monotonic_ns(void){
+    struct timespec ts;
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) return 0;
+    return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
+}
+#endif
 
 /* ---------- directory building ---------- */
 
@@ -104,7 +115,13 @@ static uint32_t build_dir(FILE *out, uint64_t *pos, const char *path){
     for(uint32_t i=0;i<n;i++){ keys[i]=es[i].name; kl[i]=(uint32_t)strlen(es[i].name); }
     struct efs_mph_in mi={n,(const char*const*)keys,kl};
     struct efs_mph_out mo;
+#ifdef EFS_BENCH
+    uint64_t mph_start = monotonic_ns();
+#endif
     if(!efs_mph_build(&mi,&mo)){ fprintf(stderr,"mph fail in %s\n",path); exit(1); }
+#ifdef EFS_BENCH
+    efs_mph_build_ns += monotonic_ns() - mph_start;
+#endif
 
     /* local MPH index (mirrors efs.h reader). The key length is taken from
      * the kl[] array we already built, so we don't re-scan the string here
@@ -174,6 +191,9 @@ static uint32_t build_dir(FILE *out, uint64_t *pos, const char *path){
  * and write it to outpath (with the EFS magic prepended). Returns 0 on
  * success, -1 on failure. Used by the CLI below and by efstest. */
 EFS_BUILD_API int efs_build_path(const char *srcpath, const char *outpath){
+#ifdef EFS_BENCH
+    efs_mph_build_ns = 0;
+#endif
     FILE *out=fopen(outpath,"wb");
     if(!out){ perror("fopen"); return -1; }
     fwrite(EFS_MAGIC,1,4,out);
@@ -189,4 +209,3 @@ int main(int argc,char**argv){
     return efs_build_path(argv[2], argv[1]) == 0 ? 0 : 1;
 }
 #endif
-
