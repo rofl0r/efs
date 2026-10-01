@@ -155,32 +155,41 @@ static uint64_t monotonic_ns(void){
     return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
 }
 
-static void evict_tree(const char *path){
-    DIR *d = opendir(path);
-    if (!d) return;
+static void evict_dir(int fd){
+    int iterfd = dup(fd);
+    if (iterfd < 0) return;
+    DIR *d = fdopendir(iterfd);
+    if (!d){ close(iterfd); return; }
     struct dirent *de;
     while ((de = readdir(d))){
         if (!strcmp(de->d_name, ".") || !strcmp(de->d_name, "..")) continue;
-        char child[4096];
-        snprintf(child, sizeof child, "%s/%s", path, de->d_name);
+        int childfd = openat(dirfd(d), de->d_name,
+                             O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+        if (childfd < 0) continue;
         struct stat st;
-        if (lstat(child, &st) != 0) continue;
-        if (S_ISDIR(st.st_mode)) evict_tree(child);
-        else {
-            int fd = open(child, O_RDONLY);
-            if (fd >= 0){
-                (void)posix_fadvise(fd, 0, 0, POSIX_FADV_DONTNEED);
-                close(fd);
-            }
+        if (fstat(childfd, &st) == 0){
+            if (S_ISDIR(st.st_mode)) evict_dir(childfd);
+            else if (S_ISREG(st.st_mode))
+                (void)posix_fadvise(childfd, 0, 0, POSIX_FADV_DONTNEED);
         }
+        close(childfd);
     }
     closedir(d);
 }
 
+static void evict_tree(const char *path){
+    int fd = open(path, O_RDONLY | O_CLOEXEC | O_DIRECTORY);
+    if (fd < 0) return;
+    evict_dir(fd);
+    close(fd);
+}
+
 static void evict_file(const char *path){
-    int fd = open(path, O_RDONLY);
+    int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
     if (fd >= 0){
-        (void)posix_fadvise(fd, 0, 0, POSIX_FADV_DONTNEED);
+        struct stat st;
+        if (fstat(fd, &st) == 0 && S_ISREG(st.st_mode))
+            (void)posix_fadvise(fd, 0, 0, POSIX_FADV_DONTNEED);
         close(fd);
     }
 }
