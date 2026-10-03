@@ -27,7 +27,7 @@ struct efs_dir {
     uint32_t blen;
     uint32_t salt;
     uint32_t names_len;
-    uint32_t w;      /* jmph: displacement width; bbhash: serialized table bytes */
+    uint32_t w;      /* jmph: bytes per displacement (1..4); bbhash: serialized table length */
     uint8_t shift;   /* jmph: MPH shift; bbhash: unused (0) */
     uint8_t reserved[3];
 };
@@ -65,8 +65,12 @@ static const uint8_t  *dir_hashtab(const struct efs_dir *d){
     return (const uint8_t*)(d + 1);
 }
 static const uint32_t *dir_name_off(const struct efs_dir *d){
-    /* efs_mph_bytes(blen, w) is algorithm-specific: jmph uses w as its
-     * displacement width, while BBHash uses w as the serialized table length. */
+    /* efs_mph_bytes(blen, w) is the unified table-size function. For jmph w
+     * is the displacement width and the size is computed from (blen, w). For
+     * BBHash the level sizes are collision-dependent data, so the builder
+     * stored the exact serialized table length in w and the size function
+     * just returns it. Either way the size is derived from the stored params
+     * with no extra descriptor. */
     return (const uint32_t*)(dir_hashtab(d) + efs_mph_bytes(d->blen, d->w));
 }
 static const uint32_t *dir_entry_off(const struct efs_dir *d){
