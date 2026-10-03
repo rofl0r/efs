@@ -27,7 +27,9 @@
  *
  * For BBHash the four consumer params map as: blen = num_levels, salt = hash
  * seed, w = serialized table length, shift = 0 (unused). BBHash levels are
- * sized from the actual collision counts, so the table length is stored in w.
+ * sized from the actual collision counts (data-dependent), so the exact
+ * serialized length cannot be derived from (levels, n) alone -- the builder
+ * therefore stores it in w. See DETERMINISTIC-SIZING.md for the rationale.
  *
  * Standalone API (preserved): mph_build(keys, n, &len) -> blob, and
  * mph_lookup(blob, len, key, keylen) -> 1-based rank (0 = not found).
@@ -445,6 +447,16 @@ MPH_INTERNAL mph_boomphf_t *mph_new_boomphf(double gamma, uint64_t *keys,
     uint64_t *current_keys = keys;
 
     while (remaining > 0) {
+        /* Level sizing (collision-dependent): level i is sized for the
+         * *actual* number of keys that remain after the previous level's
+         * collisions, not a planned count like ceil(num_keys / 2^i). The
+         * resulting sizes vary with the key set and seed, so the serialized
+         * table length is not derivable from (num_levels, num_keys); the
+         * builder records the exact length in mph_out.w instead (see
+         * mph_bytes()). An earlier deterministic scheme (planned sizing with
+         * gamma=2, which made size a pure function of (levels, n)) was
+         * reverted after benchmarks showed no meaningful size or speed win --
+         * see DETERMINISTIC-SIZING.md and BBHASH-BENCHMARK.md. */
         unsigned bitsize = ((unsigned)(gamma * remaining) + 63) & ~63U;
 
         mph_bitvector_t *A = mph_new_bv(bitsize);
@@ -898,12 +910,18 @@ struct mph_out {
     uint32_t  blen;  /* BBHash num_levels                                */
     uint32_t  shift; /* unused (0)                                       */
     uint32_t  salt;  /* hash seed                                        */
-    uint32_t  w;     /* serialized table length for the unified EFS API     */
+    uint32_t  w;     /* serialized table length (see mph_bytes)             */
 };
 
-/* Unified-API size function. BBHash level sizes depend on actual collisions,
- * so the builder stores the serialized length in w; unlike jmph_bytes(),
- * mph_bytes() returns that stored length unchanged. */
+/* Unified-API size function: mph_bytes(levels, w). For BBHash the per-level
+ * bitsizes are collision-dependent data (a pure function of neither
+ * (levels, n) nor anything else the consumer knows), so the blob is NOT
+ * size-computable from its params the way jmph's table is via
+ * jmph_bytes(blen, w). Instead, the builder knows the exact serialized
+ * length (mph_out.len) and stores it in w, so this function simply returns
+ * that stored length unchanged. The `levels` argument is accepted only to
+ * keep the unified signature and is ignored. For the size of a concrete
+ * table you can also use mph_out.len from mph_build_u() directly. */
 MPH_DEF uint32_t mph_bytes(uint32_t levels, uint32_t table_len);
 
 /* Unified build: 1 on success (out filled, out->data malloc'd), 0 on
@@ -953,7 +971,8 @@ MPH_DEF int mph_build_u(const struct mph_in *in, struct mph_out *out){ /* builde
     out->blen  = blen;
     out->salt  = salt;
     out->shift = 0;
-    out->w     = out->len;
+    out->w     = out->len;   /* serialized table length, used by
+                              * mph_index_p for table sizing / bounds checks */
     return 1;
 }
 

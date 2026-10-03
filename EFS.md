@@ -28,10 +28,11 @@ straightforward linear on-disk layout.
 
 The four MPH parameters (`blen`, `salt`, `w`, `shift`) are algorithm-generic
 slots (see UNIVERSAL-API-REVISED.md): the MPH implementation is chosen at
-compile time, so the header carries no algorithm descriptor. For jmph (the default) `blen`=table buckets, `salt`=seed, `w`=displacement
-width (1..4), `shift`=hash shift. For BBHash `blen`=level count, `salt`=seed,
-`w`=serialized BBHash table length, `shift`=0. The meaning of `w` is
-algorithm-specific; `mph_bytes(blen, w)` is the shared size-function signature.
+compile time, so the header carries no algorithm descriptor. For jmph (the
+default) `blen`=table buckets, `salt`=seed, `w`=displacement width (1..4),
+`shift`=hash shift. For BBHash `blen`=level count, `salt`=seed, `w`=serialized
+BBHash table length, `shift`=0. The meaning of `w` is algorithm-specific;
+`mph_bytes(blen, w)` is the shared size-function signature.
 
 ## Directory header (fixed fields, 24 bytes)
 struct efs_dir {
