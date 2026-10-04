@@ -19,36 +19,48 @@ into `name_offset` / `entry_offset` - **O(1) with no chaining or search**.
 All structural fields are 32-bit relative offsets from the directory header,
 so the image is position-independent and can be concatenated to any binary or
 mapped from a block device; the caller only adds a base pointer. Storage is
-kept minimal: only `count`, `blen`, `salt`, `names_len`, `w`, and `shift` are
-stored (24 bytes), while the use of a scramble table is derived, not
-duplicated. Directory vs file is encoded in the leading `/` of the name,
-avoiding a type field. The result is a ROM-friendly structure with
+kept minimal: only `count`, `blen`, `salt`, `names_len`, and the 4-byte
+`mph_params` union are stored (20 bytes), while the use of a scramble table is
+derived, not duplicated. Directory vs file is encoded in the leading `/` of
+the name, avoiding a type field. The result is a ROM-friendly structure with
 deterministic O(1) lookup, no dynamic allocation at read time, and a
 straightforward linear on-disk layout.
 
-The four MPH parameters (`blen`, `salt`, `w`, `shift`) are algorithm-generic
-slots (see UNIVERSAL-API-REVISED.md): the MPH implementation is chosen at
-compile time, so the header carries no algorithm descriptor. For jmph (the
-default) `blen`=table buckets, `salt`=seed, `w`=displacement width (1..4),
-`shift`=hash shift. For BBHash `blen`=level count, `salt`=seed, `w`=serialized
-BBHash table length, `shift`=0. The meaning of `w` is algorithm-specific;
-`mph_bytes(blen, w)` is the shared size-function signature.
+The four algorithm-specific parameter bytes live in a per-algorithm union
+inside the header (`mph_params`; see UNIVERSAL-API-REVISED.md): the MPH
+implementation is chosen at compile time, so the header carries no algorithm
+descriptor. `blen` and `salt` remain shared u32 slots (for jmph: table buckets
+and hash seed; for BBHash: level count and seed). The union then gives each
+algorithm its own angle on the remaining 4 bytes: oomph/BBHash occupies all
+four as `bb_sz`, the exact serialized table length (full u32 range), while
+jmph uses the two u8 fields `w` (displacement width, 1..4) and `shift` (hash
+shift) plus 2 spare bytes. This union is also the argument of the unified
+size function: the compile-time #ifdef in efs_mph.h maps
+`efs_mph_bytes(blen, mph_params)` to `mph_bytes(blen, p)` (which reads
+`p.bb_sz`) for oomph or `jmph_bytes(blen, p.jmph.w)` for jmph -- each backend
+accesses its own angle of the union.
 
-## Directory header (fixed fields, 24 bytes)
+## Directory header (fixed fields, 20 bytes)
 struct efs_dir {
     uint32_t count;      /* number of entries */
     uint32_t blen;       /* MPH param: table buckets (jmph) / levels (bbhash) */
     uint32_t salt;       /* MPH param: hash seed */
     uint32_t names_len;  /* byte length of names blob (padded to 4) */
-    uint32_t w;          /* MPH param: displacement width (jmph) / table bytes (bbhash) */
-    uint8_t  shift;      /* MPH param: hash shift (jmph); unused (bbhash) */
-    uint8_t  reserved[3];
+    union mph_params {
+        uint32_t bb_sz;              /* oomph: serialized table length */
+        struct {
+            uint8_t  w;              /* jmph: displacement width (1..4) */
+            uint8_t  shift;          /* jmph: hash shift */
+            uint8_t  reserved[2];    /* jmph: spare, always 0 */
+        } jmph;
+    } mph_params;        /* per-algorithm view of the MPH parameter bytes */
 };
 
 ## On-disk layout (immediately after header)
-[ hashtab       ]  size = mph_bytes(blen, w)  (opaque MPH data; the unified
-                                             per-algorithm size function --
-                                             jmph_bytes / mph_bytes)
+[ hashtab       ]  size = efs_mph_bytes(blen, mph_params)  (opaque MPH data;
+                                             the unified macro -- p.bb_sz for
+                                             oomph, jmph_bytes(blen, w) for
+                                             jmph)
 [ name_offset[] ]  u32[count]                 (indexed by MPH index)
 [ entry_offset[]]  u32[count+1]               (data ranges)
 [ names         ]  u8[names_len]              (NUL-terminated, 4-byte padded)
@@ -74,6 +86,6 @@ count, returns NULL and sets cursor = 0.
 
 ## Helpers (internal)
 dir_hashtab(d)   = (u8*)(d+1)
-dir_name_off(d)  = (u32*)(dir_hashtab(d) + mph_bytes(d->blen, d->w))
+dir_name_off(d)  = (u32*)(dir_hashtab(d) + efs_mph_bytes(d->blen, d->mph_params))
 dir_entry_off(d) = dir_name_off(d) + d->count
 dir_names(d)     = (u8*)(dir_entry_off(d) + d->count + 1)

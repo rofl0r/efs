@@ -23,13 +23,17 @@
  *   struct mph_out { uint8_t *data; uint32_t len, blen, shift, salt, w; }
  *   int      mph_build_u(const struct mph_in *, struct mph_out *);
  *   uint32_t mph_index_p(tab, blen, shift, salt, w, key, klen);   // 0-based
- *   uint32_t mph_bytes(levels, table_len);  // serialized size
+ *   uint32_t mph_bytes(blen, p);  // unified size fn: takes the shared
+ *                                 // bucket count (ignored) plus the EFS
+ *                                 // header's union mph_params; returns p.bb_sz
  *
- * For BBHash the four consumer params map as: blen = num_levels, salt = hash
- * seed, w = serialized table length, shift = 0 (unused). BBHash levels are
- * sized from the actual collision counts (data-dependent), so the exact
- * serialized length cannot be derived from (levels, n) alone -- the builder
- * therefore stores it in w. See DETERMINISTIC-SIZING.md for the rationale.
+ * For BBHash the consumer params map as: blen = num_levels, salt = hash
+ * seed, w (= EFS's mph_params.bb_sz) = serialized table length, shift = 0
+ * (unused). BBHash levels are sized from the actual collision counts
+ * (data-dependent), so the exact serialized length cannot be derived from
+ * (levels, n) alone -- the builder therefore stores it in the dedicated
+ * bb_sz angle of the EFS header's mph_params union. See DETERMINISTIC-SIZING.md
+ * for the rationale.
  *
  * Standalone API (preserved): mph_build(keys, n, &len) -> blob, and
  * mph_lookup(blob, len, key, keylen) -> 1-based rank (0 = not found).
@@ -913,16 +917,19 @@ struct mph_out {
     uint32_t  w;     /* serialized table length (see mph_bytes)             */
 };
 
-/* Unified-API size function: mph_bytes(levels, w). For BBHash the per-level
- * bitsizes are collision-dependent data (a pure function of neither
- * (levels, n) nor anything else the consumer knows), so the blob is NOT
- * size-computable from its params the way jmph's table is via
- * jmph_bytes(blen, w). Instead, the builder knows the exact serialized
- * length (mph_out.len) and stores it in w, so this function simply returns
- * that stored length unchanged. The `levels` argument is accepted only to
- * keep the unified signature and is ignored. For the size of a concrete
+/* Unified-API size function: mph_bytes(blen, p), matching the shape of
+ * jmph_bytes(blen, w) but taking the whole per-algorithm parameter union
+ * (union mph_params, see efs.h) instead of a bare width. BBHash reads only
+ * the bb_sz angle of it and ignores blen. For BBHash the per-level bitsizes
+ * are collision-dependent data (a pure function of neither (levels, n) nor
+ * anything else the consumer knows), so the blob is NOT size-computable from
+ * its params the way jmph's table is via jmph_bytes(blen, w). Instead, the
+ * builder knows the exact serialized length (mph_out.len) and the EFS header
+ * stores it in the bb_sz angle of mph_params, so this function simply
+ * returns that stored length unchanged. In EFS it is reached through the
+ * efs_mph_bytes(blen, p) macro (see efs_mph.h); for the size of a concrete
  * table you can also use mph_out.len from mph_build_u() directly. */
-MPH_DEF uint32_t mph_bytes(uint32_t levels, uint32_t table_len);
+MPH_DEF uint32_t mph_bytes(uint32_t blen, union mph_params p);
 
 /* Unified build: 1 on success (out filled, out->data malloc'd), 0 on
  * duplicate keys / OOM. Keys must be unique. */
@@ -936,9 +943,9 @@ MPH_DEF uint32_t mph_index_p(const uint8_t *tab, uint32_t blen, uint32_t shift,
                              uint32_t salt, uint32_t w,
                              const char *key, uint32_t klen);
 
-MPH_DEF uint32_t mph_bytes(uint32_t levels, uint32_t table_len){
-    (void)levels;
-    return table_len;
+MPH_DEF uint32_t mph_bytes(uint32_t blen, union mph_params p){
+    (void)blen;               /* BBHash size is stored data, not derived */
+    return p.bb_sz;           /* BBHash angle: the builder-stored serialized length */
 }
 
 MPH_DEF uint32_t mph_index_p(const uint8_t *tab, uint32_t blen, uint32_t shift,
@@ -948,7 +955,8 @@ MPH_DEF uint32_t mph_index_p(const uint8_t *tab, uint32_t blen, uint32_t shift,
     if (!tab) return 0;
     if (blen && tab[0] != (uint8_t)blen) return 0;   /* params disagree with blob */
     /* w carries the serialized table length for mph_lookup's bounds checks. */
-    size_t tablen = mph_bytes((uint32_t)tab[0], w);
+    union mph_params p = { .bb_sz = w };
+    size_t tablen = mph_bytes(blen, p);
     uint64_t r = mph_lookup(tab, tablen, key, klen);
     return r ? (uint32_t)(r - 1) : 0;
 }
