@@ -153,8 +153,19 @@ static uint32_t build_dir(FILE *out, uint64_t *pos, const char *path){
     }
 
     uint64_t dir_start=*pos;
-    struct efs_dir hdr={0};
-    hdr.count=n; hdr.blen=mo.blen; hdr.shift=mo.shift; hdr.salt=mo.salt; hdr.w=mo.w; hdr.names_len=names_len;
+    struct efs_dir hdr={0};   /* zero-init: reserved[2] and unused union bytes stay deterministic */
+    hdr.count=n; hdr.blen=mo.blen; hdr.salt=mo.salt; hdr.names_len=names_len;
+#if defined(EFS_MPH_OOMPH)
+    /* oomph/BBHash: the serialized table length needs the full u32 range;
+     * store mo.len directly (mo.w == mo.len anyway). shift is unused. */
+    hdr.mph_params.bb_sz = mo.len;
+#else
+    /* jmph: w is the displacement width and shift the hash shift. The
+     * builder guarantees mo.w <= 4 and mo.shift <= 63, so narrowing both
+     * into the u8 union fields is lossless. */
+    hdr.mph_params.jmph.w = (uint8_t)mo.w;
+    hdr.mph_params.jmph.shift = (uint8_t)mo.shift;
+#endif
     fseek(out,(long)dir_start,SEEK_SET);
     fwrite(&hdr,1,sizeof hdr,out);
     fwrite(mo.data,1,mo.len,out);

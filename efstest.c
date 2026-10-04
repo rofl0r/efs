@@ -248,7 +248,7 @@ static void verify_dir(const char *srcpath, const char *efspath){
     const uint8_t *dp = efs_lookup(g_root, efspath, &dl, &ddir);
     if (!dp || !ddir){ printf("DIR NOT FOUND: %s\n", efspath); g_failed++; sv_free(&src); return; }
     const struct efs_dir *sub = (const struct efs_dir*)dp;
-    g_hash_table_bytes += efs_mph_bytes(sub->blen, sub->w);
+    g_hash_table_bytes += efs_mph_bytes(sub->blen, sub->mph_params);
     struct strvec got = {0};
     uint32_t cur = 0; const char *nm;
     while ((nm = efs_readdir(sub, &cur))){

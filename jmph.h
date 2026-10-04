@@ -95,7 +95,9 @@ struct jmph_out {
 
 /* Exact serialized size of a built table (blen/w). This is part of the
  * MPH layout, so it lives here in jmph.h (the on-disk efs consumer calls
- * it to skip past the hash table). */
+ * it to skip past the hash table; via efs_mph_bytes(p) the caller's blen
+ * argument comes from the shared header slot and w from p.jmph.w -- the
+ * jmph angle of the EFS header's union mph_params). */
 JMPH_DEF uint32_t jmph_bytes(uint32_t blen, uint32_t w);
 
 /* Map `key` (klen bytes) to its unique slot in [0, blen-1], which is
