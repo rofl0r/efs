@@ -123,16 +123,30 @@ static uint32_t build_dir(FILE *out, uint64_t *pos, const char *path){
     efs_mph_build_ns += monotonic_ns() - mph_start;
 #endif
 
-    /* local MPH index (mirrors efs.h reader). The key length is taken from
-     * the kl[] array we already built, so we don't re-scan the string here
-     * (efs_mph_index only needs the length). */
+    /* Local MPH index (mirrors the efs.h reader). The key length is taken
+     * from the kl[] array we already built, so we don't re-scan the string
+     * here (efs_mph_index only needs the length). efs_mph_index takes the
+     * shared blen/salt slots plus the whole parameter union -- exactly what
+     * goes into the header below -- and each backend reads its own angle. */
+    union mph_params mp = {0};
+#if defined(EFS_MPH_OOMPH)
+    /* oomph/BBHash: the serialized table length needs the full u32 range;
+     * store mo.len directly (mo.w == mo.len anyway). shift is unused. */
+    mp.bb_sz = mo.len;
+#else
+    /* jmph: w is the displacement width and shift the hash shift. The
+     * builder guarantees mo.w <= 4 and mo.shift <= 63, so narrowing both
+     * into the u8 union fields is lossless. */
+    mp.jmph.w = (uint8_t)mo.w;
+    mp.jmph.shift = (uint8_t)mo.shift;
+#endif
     uint32_t *order = malloc(n * sizeof(uint32_t));
     for(uint32_t i=0;i<n;i++) order[i] = i;
     for(uint32_t i=1;i<n;i++){
         uint32_t key = order[i];
         uint32_t j = i;
-        while(j>0 && efs_mph_index(mo.data, mo.blen, mo.shift, mo.salt, mo.w, es[order[j-1]].name, kl[order[j-1]])
-                     > efs_mph_index(mo.data, mo.blen, mo.shift, mo.salt, mo.w, es[key].name, kl[key])){
+        while(j>0 && efs_mph_index(mo.data, mo.blen, mo.shift, mo.salt, mp, es[order[j-1]].name, kl[order[j-1]])
+                     > efs_mph_index(mo.data, mo.blen, mo.shift, mo.salt, mp, es[key].name, kl[key])){
             order[j] = order[j-1]; j--;
         }
         order[j] = key;
@@ -155,17 +169,9 @@ static uint32_t build_dir(FILE *out, uint64_t *pos, const char *path){
     uint64_t dir_start=*pos;
     struct efs_dir hdr={0};   /* zero-init: reserved[2] and unused union bytes stay deterministic */
     hdr.count=n; hdr.blen=mo.blen; hdr.salt=mo.salt; hdr.names_len=names_len;
-#if defined(EFS_MPH_OOMPH)
-    /* oomph/BBHash: the serialized table length needs the full u32 range;
-     * store mo.len directly (mo.w == mo.len anyway). shift is unused. */
-    hdr.mph_params.bb_sz = mo.len;
-#else
-    /* jmph: w is the displacement width and shift the hash shift. The
-     * builder guarantees mo.w <= 4 and mo.shift <= 63, so narrowing both
-     * into the u8 union fields is lossless. */
-    hdr.mph_params.jmph.w = (uint8_t)mo.w;
-    hdr.mph_params.jmph.shift = (uint8_t)mo.shift;
-#endif
+    /* Same per-algorithm parameter bytes the index sort above used: one
+     * union copy, no further algorithm-specific field mapping. */
+    hdr.mph_params = mp;
     fseek(out,(long)dir_start,SEEK_SET);
     fwrite(&hdr,1,sizeof hdr,out);
     fwrite(mo.data,1,mo.len,out);

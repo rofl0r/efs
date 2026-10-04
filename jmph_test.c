@@ -5,6 +5,10 @@
  * is 1-based (jmph_index() + 1). The test_*.sh harness verifies the
  * output is a permutation of 1..N (i.e. a valid minimal perfect hash).
  */
+/* jmph.h now names `union mph_params` (the shared per-algorithm parameter
+ * union) in its prototypes; include efs.h first so the type is defined. The
+ * header itself stays inert here -- we only want the MPH builder API. */
+#include "efs.h"
 #define MPH_IMPL
 #include "jmph.h"
 
