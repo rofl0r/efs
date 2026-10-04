@@ -79,7 +79,7 @@ struct jmph_out {
     uint32_t  shift; /* a = hash >> shift */
     uint32_t  salt;  /* seed passed to the string hash */
     uint32_t  w;     /* bytes per scramble/disp entry (1..4) */
-    uint32_t  len;   /* == jmph_bytes(blen, w); serialized size of data */
+    uint32_t  len;   /* == jmph_bytes(blen, p) with p.jmph.w = w; serialized size of data */
     uint8_t  *data;  /* packed table; free() with free() */
 };
 
@@ -93,12 +93,25 @@ struct jmph_out {
 #define JMPH_DEF static inline
 #endif
 
-/* Exact serialized size of a built table (blen/w). This is part of the
- * MPH layout, so it lives here in jmph.h (the on-disk efs consumer calls
- * it to skip past the hash table; via efs_mph_bytes(p) the caller's blen
- * argument comes from the shared header slot and w from p.jmph.w -- the
- * jmph angle of the EFS header's union mph_params). */
-JMPH_DEF uint32_t jmph_bytes(uint32_t blen, uint32_t w);
+/* Build a parameter union from a bare displacement width: the jmph angle of
+ * `union mph_params` (defined in efs.h, which includes this header through
+ * efs_mph.h). Standalone users that include jmph.h directly must provide the
+ * union themselves, e.g. by including efs.h first. */
+static inline union mph_params jmph_params(uint32_t w){
+    union mph_params p = { .bb_sz = 0 };
+    p.jmph.w = (uint8_t)w;
+    return p;
+}
+
+/* Exact serialized size of a built table. The unified size function takes
+ * the whole per-algorithm parameter union (union mph_params, defined in
+ * efs.h before the MPH headers are included) with the same prototype as
+ * BBHash's mph_bytes(blen, p); jmph reads its own angle of it -- the
+ * displacement width p.jmph.w -- and ignores the rest. This formula is part
+ * of the MPH layout, so it lives here in jmph.h (the on-disk efs consumer
+ * calls it through the efs_mph_bytes(blen, p) macro to skip past the hash
+ * table; blen comes from the shared header slot). */
+JMPH_DEF uint32_t jmph_bytes(uint32_t blen, union mph_params p);
 
 /* Map `key` (klen bytes) to its unique slot in [0, blen-1], which is
  * [0, n-1] for a minimal perfect hash. This is the exact inverse of
@@ -106,13 +119,16 @@ JMPH_DEF uint32_t jmph_bytes(uint32_t blen, uint32_t w);
  * re-implementing it. */
 JMPH_DEF uint32_t jmph_index(const struct jmph_out *mo, const uint8_t *key, uint32_t klen);
 
-/* Unified-API decode: same as jmph_index() but takes the raw table pointer
- * and the four parameters directly, which is what a consumer has after
- * reading them back from storage (e.g. the efs_dir header). Behaviour for a
- * key that was not in the build set is undefined (efs verifies the matched
- * name, so this is safe there). */
+/* Unified-API decode: same as jmph_index() but takes the raw table pointer,
+ * the two shared parameters (blen/salt) and the per-algorithm parameter
+ * union directly -- the identical prototype on every backend (see BBHash's
+ * mph_index_p), which lets an EFS image pass its stored d->mph_params
+ * straight through with no algorithm-specific #ifdef at the call site. jmph
+ * reads its own angle of the union (p.jmph.w and p.jmph.shift). Behaviour
+ * for a key that was not in the build set is undefined (efs verifies the
+ * matched name, so this is safe there). */
 JMPH_DEF uint32_t jmph_index_p(const uint8_t *tab, uint32_t blen, uint32_t shift,
-                               uint32_t salt, uint32_t w,
+                               uint32_t salt, union mph_params p,
                                const char *key, uint32_t klen);
 
 /* Build a minimal perfect hash for the given (unique) keys.
@@ -126,7 +142,8 @@ JMPH_DEF int jmph_build(const struct jmph_in *in, struct jmph_out *out);
 
 /* jmph_bytes is needed by the efs consumer (to locate the name table),
  * so its definition is always available, not just on the builder path. */
-JMPH_DEF uint32_t jmph_bytes(uint32_t blen, uint32_t w){
+JMPH_DEF uint32_t jmph_bytes(uint32_t blen, union mph_params p){
+    uint32_t w = p.jmph.w;      /* jmph angle: bytes per displacement entry */
     return (blen >= USE_SCRAMBLE) ? (blen + 256 * w) : (blen * w);
 }
 
@@ -181,8 +198,9 @@ JMPH_DEF uint32_t jmph_tab_load(const uint8_t *p, uint32_t w){
 }
 
 JMPH_DEF uint32_t jmph_index_p(const uint8_t *tab, uint32_t blen, uint32_t shift,
-                               uint32_t salt, uint32_t w,
+                               uint32_t salt, union mph_params p,
                                const char *key, uint32_t klen){
+    uint32_t w = p.jmph.w;      /* jmph angle: bytes per displacement entry */
     uint32_t v = jmph_lookup_k((const uint8_t*)key, klen, salt * 0x9e3779b9);
     uint32_t a = v >> shift;
     uint32_t b = v & (blen - 1);
@@ -401,8 +419,8 @@ JMPH_INTERNAL void jmph_initalen(uint32_t n, uint32_t smax, uint32_t *alen, uint
 }
 
 JMPH_DEF uint32_t jmph_index(const struct jmph_out *mo, const uint8_t *key, uint32_t klen){
-    return jmph_index_p(mo->data, mo->blen, mo->shift, mo->salt, mo->w,
-                        (const char*)key, klen);
+    return jmph_index_p(mo->data, mo->blen, mo->shift, mo->salt,
+                        jmph_params(mo->w), (const char*)key, klen);
 }
 
 JMPH_DEF int jmph_build(const struct jmph_in *in, struct jmph_out *out){
@@ -414,7 +432,7 @@ JMPH_DEF int jmph_build(const struct jmph_in *in, struct jmph_out *out){
         out->shift = 31;
         out->salt = 0;
         out->w = 1;
-        out->len = jmph_bytes(1, 1);
+        out->len = jmph_bytes(1, jmph_params(1));
         out->data = calloc(1, out->len);
         return out->data ? 1 : 0;
     }
@@ -465,7 +483,7 @@ JMPH_DEF int jmph_build(const struct jmph_in *in, struct jmph_out *out){
             if(scramble[i] == a0){ vb = i; disp0 = scramble[i]; break; }
         }
         uint32_t w = (sl + 7) / 8;
-        uint32_t total_bytes = jmph_bytes(1, w);
+        uint32_t total_bytes = jmph_bytes(1, jmph_params(w));
         out->data = malloc(total_bytes);
         if(!out->data){ free(scramble); free(vbuf); free(ka); free(kb);
             free(tabb); free(flat_list); free(counts); free(order);
@@ -570,7 +588,7 @@ JMPH_DEF int jmph_build(const struct jmph_in *in, struct jmph_out *out){
     if(!ok) goto fail;
 
     uint32_t w = (sl + 7) / 8;   /* based on smax */
-    uint32_t total_bytes = jmph_bytes(blen, w);
+    uint32_t total_bytes = jmph_bytes(blen, jmph_params(w));
     out->data = malloc(total_bytes);
     if(!out->data) goto fail;
     memset(out->data, 0, total_bytes);

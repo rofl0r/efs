@@ -4,8 +4,28 @@
 #include <stdint.h>
 #include <string.h>
 
+/* Per-algorithm view of the 4 algorithm-specific MPH parameter bytes. The
+ * unified size/index functions (jmph_bytes/mph_bytes and
+ * jmph_index_p/mph_index_p -- identical prototypes on both backends) take
+ * this union directly, and each backend reads its own angle of it
+ * (p.jmph.w/p.jmph.shift for jmph, p.bb_sz for BBHash; see efs_mph.h).
+ * This is the canonical definition; the MPH headers below may only declare
+ * the type (never redefine it), hence it lives here, before they are
+ * included. */
+#ifndef EFS_MPH_PARAMS_DEFINED
+#define EFS_MPH_PARAMS_DEFINED
+union mph_params {
+    uint32_t bb_sz;               /* oomph/BBHash: serialized table length (full u32 range) */
+    struct {
+        uint8_t  w;               /* jmph: bytes per displacement (1..4) */
+        uint8_t  shift;           /* jmph: hash shift (0..63) */
+        uint8_t  reserved[2];     /* jmph: spare, always 0 */
+    } jmph;
+};
+#endif
+
 /* The MPH generator is selected at compile time by efs_mph.h (jmph.h by
- * default; oomph/mph.h when EFS_MPH_OOMPH is defined). We include it up
+ * default; bbhash.h when EFS_MPH_OOMPH is defined). We include it up
  * front so the on-disk consumer (EFS_IMPL) can call efs_mph_index()/
  * efs_mph_bytes() to locate and read the name table; the heavy builder code
  * is only compiled when MPH_IMPL or EFS_BUILDER is defined. */
@@ -27,17 +47,7 @@ struct efs_dir {
     uint32_t blen;
     uint32_t salt;
     uint32_t names_len;
-    /* Per-algorithm view of the 4 algorithm-specific parameter bytes. This
-     * union is the single argument the unified size function takes: each
-     * backend's *_bytes(p) reads its own angle of it (see efs_mph.h). */
-    union mph_params {
-        uint32_t bb_sz;               /* oomph/BBHash: serialized table length (full u32 range) */
-        struct {
-            uint8_t  w;               /* jmph: bytes per displacement (1..4) */
-            uint8_t  shift;           /* jmph: hash shift (0..63) */
-            uint8_t  reserved[2];     /* jmph: spare, always 0 */
-        } jmph;
-    } mph_params;                     /* named member: d->mph_params.jmph.w etc. */
+    union mph_params mph_params;  /* named member: d->mph_params.jmph.w etc. */
 };
 
 #ifdef EFS_IMPL
@@ -64,20 +74,19 @@ EFS_BUILD_API int         efs_build_path(const char *srcpath, const char *outpat
 #include <stdint.h>
 #include <string.h>
 
-/* The MPH decode lives in the selected MPH header (jmph.h by default). The
- * reader supplies the four parameters stored in the directory header plus
- * the table bytes that follow it; behaviour for a key outside the build set
- * is undefined, so efs_lookup() verifies the matched name before trusting
- * the index. */
+/* The MPH decode lives in the selected MPH header (jmph.h by default). Both
+ * backends expose the identical prototype
+ *     X_index_p(tab, blen, shift, salt, union mph_params p, key, klen)
+ * and each reads its own angle of the parameter union (jmph: p.jmph.shift /
+ * p.jmph.w; BBHash: p.bb_sz -- BBHash ignores shift entirely), so this call
+ * site needs no algorithm-specific #ifdef. The reader passes the shared
+ * header slots (blen, salt) plus the whole stored union directly; behaviour
+ * for a key outside the build set is undefined, so efs_lookup() verifies the
+ * matched name before trusting the index. */
 static uint32_t efs_dir_index(const struct efs_dir *d, const char *key){
-#ifdef EFS_MPH_OOMPH
-    /* oomph: shift is unused; the table-length argument comes from bb_sz. */
-    return efs_mph_index((const uint8_t*)(d + 1), d->blen, 0, d->salt,
-                         d->mph_params.bb_sz, key, (uint32_t)strlen(key));
-#else
-    return efs_mph_index((const uint8_t*)(d + 1), d->blen, d->mph_params.jmph.shift,
-                         d->salt, d->mph_params.jmph.w, key, (uint32_t)strlen(key));
-#endif
+    return efs_mph_index((const uint8_t*)(d + 1), d->blen,
+                         d->mph_params.jmph.shift, d->salt,
+                         d->mph_params, key, (uint32_t)strlen(key));
 }
 
 /* ---- internal layout helpers ---- */
@@ -176,8 +185,12 @@ EFS_EXPORT const char *efs_readdir(const struct efs_dir *dir, uint32_t *cursor){
  *  compile that header's builder, which exposes:
  *
  *      int      X_build(const struct X_in *in, struct X_out *out);
- *      uint32_t X_index_p(tab, blen, shift, salt, w, key, klen);
- *      uint32_t X_bytes(...);   // per-algorithm table-size function; EFS
+ *      uint32_t X_index_p(tab, blen, shift, salt, union mph_params p,
+ *                         key, klen);   // identical on both backends; each
+ *                               // reads its own angle of p (jmph: p.jmph.w /
+ *                               // p.jmph.shift, BBHash: p.bb_sz)
+ *      uint32_t X_bytes(blen, union mph_params p);  // per-algorithm table-
+ *                               // size function, same union argument; EFS
  *                               // reaches it through the
  *                               // efs_mph_bytes(blen, d->mph_params) macro
  *                               // in efs_mph.h
@@ -186,9 +199,9 @@ EFS_EXPORT const char *efs_readdir(const struct efs_dir *dir, uint32_t *cursor){
  *  table plus the algorithm parameters (blen/salt as shared u32s, plus the
  *  mph_params union: jmph's w/shift or BBHash's bb_sz) that are stored in
  *  struct efs_dir; the consumer above reads the table back with X_index_p()
- *  using those same parameters. There is no runtime algorithm descriptor:
- *  an image is built against exactly one MPH implementation, chosen at
- *  compile time.
+ *  passing those same parameters straight through. There is no runtime
+ *  algorithm descriptor: an image is built against exactly one MPH
+ *  implementation, chosen at compile time.
  * =====================================================================
  */
 
